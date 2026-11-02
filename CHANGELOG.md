@@ -2,6 +2,12 @@
 
 本文件记录用户可见的行为变化。安装方式见 [README](README.md)。
 
+## 0.5.3
+
+- 自建/转售网关（如 `maas.qianwenaiapi.com`）的 Qwen 文件转写可跑通：任务成功后的结果地址除阿里 OSS 地域桶外，也接受应答该任务的同一站点（同主机或子域；仍限 HTTPS、无账号口令、无端口、不跟跳转、不带 API Key）。
+- 结果地址查询串按 OSS 签名规则放宽：允许标准 `response-*`、`x-oss-*` 参数与 Base64 的 `+`、`%XX`，仍拒绝未知键、重复键、控制字符和缺少签名组合。
+- `failure.json` 记录 `stage`（upload_policy / upload_object / task_submit / task_poll / task_result_url / result_download / result_parse）、`shape`（字段名）与 `result_host`，便于定位失败环节；不记录服务原文、完整 URL 或任务 ID。
+
 ## 0.5.2
 
 - `dashscope_paraformer`（阿里原生异步）协议支持 Qwen 文件转写模型：`*filetrans` 模型改用 `input.file_url` 单体提交，从 `output.result.transcription_url` 取结果，返回真实毫秒级分段，可处理长录音。

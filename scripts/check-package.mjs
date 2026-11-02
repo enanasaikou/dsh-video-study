@@ -8,7 +8,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const json = filename => JSON.parse(readFileSync(join(root, filename), 'utf8'));
 const pkg = json('package.json');
 assert.equal(pkg.name, 'dsh-video-study');
-assert.equal(pkg.version, '0.5.2');
+assert.equal(pkg.version, '0.5.3');
 assert.equal(pkg.type, 'module');
 assert.equal(pkg.main, 'lib/index.js');
 assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml');

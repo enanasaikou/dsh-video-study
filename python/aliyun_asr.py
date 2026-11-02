@@ -13,15 +13,40 @@ import re
 import secrets
 import stat
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 POLL_SECONDS = 2
+
+
+@contextmanager
+def _stage(name):
+    """Tag the failing protocol stage with a fixed, provider-free name.
+
+    The DashScope async route has five very different steps (upload policy, OSS
+    upload, task submit, task poll, result download/parse). A generic
+    invalid_response tells the user nothing about which one broke, so record the
+    stage on the error instead of guessing. Names are constants from this file;
+    no provider text, URL, task id or credential is recorded.
+    """
+    try:
+        yield
+    except BaseException as exc:
+        if getattr(exc, 'stage', None) is None:
+            try:
+                exc.stage = name
+            except Exception:
+                pass
+        raise
 NATIVE_PATH = '/api/v1/services/audio/asr/transcription'
 
 
 _OSS_REGION = re.compile(r'\.oss-([a-z0-9-]{2,32})\.aliyuncs\.com$')
+_OSS_HOST = re.compile(r'(?:[a-z0-9][a-z0-9-]{1,61}[a-z0-9]\.)?oss-([a-z0-9-]{2,32})\.aliyuncs\.com')
+_SHARED_PLATFORM = ('aliyuncs.com', 'aliyun.com', 'aliyuncs.cn', 'aliyun.cn')
+_MULTI_LABEL = frozenset(('ac', 'co', 'com', 'edu', 'gov', 'net', 'org'))
 
 
 def _host_region(host):
@@ -29,64 +54,132 @@ def _host_region(host):
     return matched.group(1) if matched else None
 
 
-def _storage_url(value, region, c, *, upload=False, allow_http=False):
-    """Allow only Alibaba OSS endpoints; no URL parser ambiguities.
+def _site(host):
+    """Return the registrable suffix of a configured API host.
+
+    A compatible gateway may keep its transcription result on its own site
+    instead of Alibaba OSS, so the origin that answered the authenticated task
+    call is the only extra place a result may come from. The suffix is used for
+    an exact host or a subdomain match and never widens the scheme rules.
+    """
+    labels = [part for part in str(host or '').lower().split('.') if part]
+    if len(labels) < 2:
+        return ''
+    if len(labels) >= 3 and labels[-2] in _MULTI_LABEL and len(labels[-1]) == 2:
+        return '.'.join(labels[-3:])
+    return '.'.join(labels[-2:])
+
+
+def _storage_url(value, region, c, *, upload=False, allow_http=False, same_site=()):
+    """Allow Alibaba OSS endpoints, plus the configured gateway's own site.
 
     A None region accepts any DashScope OSS region and reports the detected one,
     so an explicitly configured compatible gateway still resolves the storage
     its own authenticated policy response names. Encoded colons (used in
     official result paths) are supported, but encoded slashes/dots, nested
     encoding, credentials, ports, redirects and arbitrary query keys are not.
-    Never return this private URL to the caller.
+    A result may also live on the host that answered the task call (or its
+    subdomains); those URLs carry no credentials, no redirects and only bounded
+    printable query fields. Never return this private URL to the caller.
     """
+    def bad(reason):
+        error = c.CloudASRError('unsafe_provider_url', c._MESSAGES['unsafe_provider_url'])
+        # Fixed stage names only: the reason never carries URL text.
+        error.reason = reason
+        raise error from None
+
     if (not isinstance(value, str) or not value or len(value) > 16384
             or any(ord(ch) <= 32 or ord(ch) >= 127 for ch in value)
             or '\\' in value or '#' in value or value.endswith('?')
             or re.search(r'%(?![0-9A-Fa-f]{2})', value)):
-        c._fail('unsafe_provider_url')
+        bad('value')
     try:
         p = urlsplit(value)
-        host = p.hostname
-        region_pattern = re.escape(region) if region else r'[a-z0-9-]{2,32}'
-        allowed = re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]\.oss-'
-                               + region_pattern + r'\.aliyuncs\.com', host or '')
-        if (p.scheme not in (('https', 'http') if allow_http else ('https',))
-                or not allowed or p.netloc != host
-                or p.username is not None or p.password is not None or p.port is not None
-                or p.fragment):
-            c._fail('unsafe_provider_url')
+        host = p.hostname or ''
+        oss = _OSS_HOST.fullmatch(host)
+        if oss and (region is None or oss.group(1) == region):
+            allowed = True
+        elif '.aliyuncs.' in host:
+            # A shared Alibaba platform host never inherits gateway trust: the
+            # OSS region pattern is the whole allowlist for these domains.
+            allowed = False
+        else:
+            allowed = False
+        gateway = tuple(site for site in (same_site or ())
+                        if site and not site.endswith(_SHARED_PLATFORM))
+        same_site = bool(gateway) and not oss and (
+            host in gateway or any(host.endswith('.' + site) for site in gateway))
+        if p.scheme not in (('https', 'http') if allow_http else ('https',)):
+            bad('scheme')
+        if not (allowed or same_site):
+            bad('host')
+        if (p.netloc != host or p.username is not None or p.password is not None
+                or p.port is not None or p.fragment):
+            bad('authority')
         if upload:
-            if p.path not in ('', '/') or p.query:
-                c._fail('unsafe_provider_url')
+            if p.path not in ('', '/') or p.query or same_site and not allowed:
+                bad('upload')
             return dict(scheme=p.scheme, host=host, port=443, path='/', loopback=False,
                         region=_host_region(host))
         if not p.path.startswith('/') or p.path.startswith('//'):
-            c._fail('unsafe_provider_url')
+            bad('path')
         for part in p.path[1:].split('/'):
             decoded = unquote(part, errors='strict')
             if (not decoded or decoded in ('.', '..') or any(ch in decoded for ch in '/\\%?#')
                     or any(ord(ch) <= 32 or ord(ch) == 127 for ch in decoded)):
-                c._fail('unsafe_provider_url')
+                bad('path')
+        if not allowed and same_site:
+            if p.query:
+                pairs = parse_qsl(p.query, keep_blank_values=True, strict_parsing=True,
+                                  max_num_fields=12)
+                if (not pairs or len(dict(pairs)) != len(pairs)
+                        or any(not v or len(v) > 8192
+                               or any(ord(ch) <= 32 or ord(ch) >= 127 for ch in v)
+                               or '\\' in v or '#' in v or '%' in v
+                               for _, v in pairs)):
+                    bad('query')
+            return dict(scheme=p.scheme, host=host, port=443,
+                        path=p.path + ('?' + p.query if p.query else ''),
+                        loopback=False, region=None)
         if not p.path.endswith('.json'):
-            c._fail('unsafe_provider_url')
-        pairs = parse_qsl(p.query, keep_blank_values=True, strict_parsing=True, max_num_fields=12)
-        allowed_keys = {'Expires', 'OSSAccessKeyId', 'Signature', 'security-token',
-                        'x-oss-security-token', 'x-oss-signature-version', 'x-oss-credential',
-                        'x-oss-date', 'x-oss-expires', 'x-oss-signature', 'x-oss-additional-headers'}
+            bad('path')
+        raw_pairs = [segment.split('=', 1) for segment in p.query.split('&')] if p.query else []
+        if not raw_pairs or any(len(segment) != 2 for segment in raw_pairs):
+            bad('query_shape')
+        pairs = parse_qsl(p.query, keep_blank_values=True, strict_parsing=True, max_num_fields=16)
         fields = dict(pairs)
-        if (len(fields) != len(pairs) or not pairs or set(fields) - allowed_keys
-                or any(not v or len(v) > 8192 or any(ord(ch) <= 32 or ord(ch) >= 127 for ch in v)
-                       or '\\' in v or '#' in v or '%' in v for v in fields.values())):
-            c._fail('unsafe_provider_url')
+        if len(fields) != len(raw_pairs):
+            bad('query_duplicate')
+        signed_keys = {'Expires', 'OSSAccessKeyId', 'Signature', 'security-token',
+                       'x-oss-security-token', 'x-oss-signature-version', 'x-oss-credential',
+                       'x-oss-date', 'x-oss-expires', 'x-oss-signature', 'x-oss-additional-headers',
+                       'response-content-type', 'response-content-language', 'response-expires',
+                       'response-cache-control', 'response-content-disposition',
+                       'response-content-encoding', 'x-oss-process'}
+        for raw_key, raw_value in raw_pairs:
+            if raw_key not in signed_keys and not raw_key.startswith('x-oss-'):
+                bad('query_key')
+            # Values stay on the wire exactly as the provider signed them, so
+            # only control characters and unsafe separators are rejected here.
+            if (not raw_value or len(raw_value) > 8192
+                    or any(not (33 <= ord(ch) <= 126) for ch in raw_value)
+                    or '\\' in raw_value or '#' in raw_value):
+                bad('query_value')
+            try:
+                decoded = unquote(raw_value, errors='strict')
+            except UnicodeError:
+                bad('query_value')
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in decoded):
+                bad('query_control')
         v1 = {'Expires', 'OSSAccessKeyId', 'Signature'}
         v4 = {'x-oss-signature-version', 'x-oss-credential', 'x-oss-date', 'x-oss-expires', 'x-oss-signature'}
         if not (v1 <= fields.keys() and fields['Expires'].isdigit()
                 or v4 <= fields.keys() and fields['x-oss-expires'].isdigit()):
-            c._fail('unsafe_provider_url')
+            bad('query_signature')
         return dict(scheme=p.scheme, host=host, port=443,
                     path=p.path + '?' + p.query, loopback=False, region=_host_region(host))
     except (ValueError, UnicodeError):
-        c._fail('unsafe_provider_url')
+        bad('parse')
 
 
 class _Session:
@@ -98,6 +191,9 @@ class _Session:
         self.private = [config['api_key']]
         self.filetrans = 'filetrans' in str(config['model']).lower()
         self.result_http = False
+        self.same_site = tuple(dict.fromkeys(
+            site for site in (config['host'], _site(config['host'])) if site))
+        self.result_host = None
 
     def json(self, raw):
         c = self.c
@@ -196,35 +292,36 @@ class _Session:
 
     def policy_upload(self, audio, path, identity, extension, region):
         c = self.c
-        policy = self.request(dict(self.config, path='/api/v1/uploads?action=getPolicy&model='
-                                   + quote(self.config['model'], safe='')), 'GET', api_auth=True)
-        data = policy.get('data')
-        if not isinstance(data, dict):
-            c._fail('invalid_response')
-        target = _storage_url(data.get('upload_host'), region, c, upload=True)
-        directory = data.get('upload_dir')
-        if (not isinstance(directory, str) or len(directory) > 2048
-                or not re.fullmatch(r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9._-]+)*', directory)
-                or any(p in ('.', '..') for p in directory.split('/'))):
-            c._fail('invalid_response')
-        # Never send an untrusted local filename or reuse an object name.
-        filename = 'audio-' + secrets.token_hex(16) + '.' + extension
-        key = directory + '/' + filename
-        boundary = 'dsh-oss-' + secrets.token_hex(16)
-        fields = []
-        names = [('OSSAccessKeyId', 'oss_access_key_id'), ('Signature', 'signature'),
-                 ('policy', 'policy'), ('x-oss-object-acl', 'x_oss_object_acl'),
-                 ('x-oss-forbid-overwrite', 'x_oss_forbid_overwrite')]
-        for name, source in names:
-            value = data.get(source)
-            if (not isinstance(value, str) or not value or len(value) > 16384
-                    or any(ord(ch) < 33 or ord(ch) > 126 for ch in value)):
+        with _stage('upload_policy'):
+            policy = self.request(dict(self.config, path='/api/v1/uploads?action=getPolicy&model='
+                                       + quote(self.config['model'], safe='')), 'GET', api_auth=True)
+            data = policy.get('data')
+            if not isinstance(data, dict):
                 c._fail('invalid_response')
-            fields.append((name, value))
-            if source in ('oss_access_key_id', 'signature', 'policy'):
-                self.private.append(value)
-        if data['x_oss_object_acl'] != 'private' or data['x_oss_forbid_overwrite'] != 'true':
-            c._fail('invalid_response')
+            target = _storage_url(data.get('upload_host'), region, c, upload=True)
+            directory = data.get('upload_dir')
+            if (not isinstance(directory, str) or len(directory) > 2048
+                    or not re.fullmatch(r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9._-]+)*', directory)
+                    or any(p in ('.', '..') for p in directory.split('/'))):
+                c._fail('invalid_response')
+            # Never send an untrusted local filename or reuse an object name.
+            filename = 'audio-' + secrets.token_hex(16) + '.' + extension
+            key = directory + '/' + filename
+            boundary = 'dsh-oss-' + secrets.token_hex(16)
+            fields = []
+            names = [('OSSAccessKeyId', 'oss_access_key_id'), ('Signature', 'signature'),
+                     ('policy', 'policy'), ('x-oss-object-acl', 'x_oss_object_acl'),
+                     ('x-oss-forbid-overwrite', 'x_oss_forbid_overwrite')]
+            for name, source in names:
+                value = data.get(source)
+                if (not isinstance(value, str) or not value or len(value) > 16384
+                        or any(ord(ch) < 33 or ord(ch) > 126 for ch in value)):
+                    c._fail('invalid_response')
+                fields.append((name, value))
+                if source in ('oss_access_key_id', 'signature', 'policy'):
+                    self.private.append(value)
+            if data['x_oss_object_acl'] != 'private' or data['x_oss_forbid_overwrite'] != 'true':
+                c._fail('invalid_response')
         fields += [('key', key), ('success_action_status', '200')]
         prefix = b''.join(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode('ascii')
                           for name, value in fields)
@@ -233,9 +330,10 @@ class _Session:
         suffix = f'\r\n--{boundary}--\r\n'.encode('ascii')
         if len(prefix) + len(suffix) > 65536:
             c._fail('response_too_large')
-        self.request(target, 'POST', headers={'Content-Type': 'multipart/form-data; boundary=' + boundary},
-                     upload=dict(audio=audio, path=path, identity=identity, size=identity.st_size,
-                                 prefix=prefix, suffix=suffix, length=len(prefix) + identity.st_size + len(suffix)))
+        with _stage('upload_object'):
+            self.request(target, 'POST', headers={'Content-Type': 'multipart/form-data; boundary=' + boundary},
+                         upload=dict(audio=audio, path=path, identity=identity, size=identity.st_size,
+                                     prefix=prefix, suffix=suffix, length=len(prefix) + identity.st_size + len(suffix)))
         oss_url = 'oss://' + key
         self.private += [key, oss_url, data['upload_host']]
         return oss_url, (region or target['region'])
@@ -257,16 +355,17 @@ class _Session:
                        input={'file_url': oss_url} if filetrans else {'file_urls': [oss_url]},
                        parameters=parameters)
         body = json.dumps(payload, separators=(',', ':')).encode('utf-8')
-        submitted = self.request(self.config, 'POST', body=body, api_auth=True,
-                                 headers={'Content-Type': 'application/json', 'X-DashScope-Async': 'enable',
-                                          'X-DashScope-OssResourceResolve': 'enable'})
-        output = submitted.get('output')
-        if not isinstance(output, dict):
-            c._fail('invalid_response')
-        task_id = output.get('task_id')
-        if not isinstance(task_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', task_id):
-            c._fail('invalid_response')
-        self.private.append(task_id)
+        with _stage('task_submit'):
+            submitted = self.request(self.config, 'POST', body=body, api_auth=True,
+                                     headers={'Content-Type': 'application/json', 'X-DashScope-Async': 'enable',
+                                              'X-DashScope-OssResourceResolve': 'enable'})
+            output = submitted.get('output')
+            if not isinstance(output, dict):
+                c._fail('invalid_response')
+            task_id = output.get('task_id')
+            if not isinstance(task_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', task_id):
+                c._fail('invalid_response')
+            self.private.append(task_id)
         # A fixed poll count would truncate the caller's budget for long jobs.
         # Two-second minimum spacing makes a timeout-derived cap finite without
         # silently imposing a second, much shorter timeout. The shared deadline
@@ -275,11 +374,37 @@ class _Session:
         for attempt in range(max_polls + 1):
             status = output.get('task_status')
             if status == 'SUCCEEDED':
+              with _stage('task_result_url'):
                 if filetrans:
+                    url = None
+                    shape = []
                     outcome = output.get('result')
-                    if not isinstance(outcome, dict):
-                        c._fail('invalid_response')
-                    url = outcome.get('transcription_url')
+                    if isinstance(outcome, dict):
+                        if isinstance(outcome.get('transcription_url'), str) and outcome['transcription_url']:
+                            url = outcome['transcription_url']
+                        else:
+                            shape.append('result:' + ','.join(sorted(map(str, outcome))[:8]))
+                    else:
+                        shape.append('result:' + type(outcome).__name__)
+                    if url is None:
+                        # Compatible gateways sometimes keep the Paraformer array
+                        # shape for the same task, so accept one fully successful
+                        # subtask before declaring the payload unsupported.
+                        results = output.get('results')
+                        if (isinstance(results, list) and len(results) == 1
+                                and isinstance(results[0], dict)
+                                and results[0].get('subtask_status') in (None, 'SUCCEEDED')
+                                and isinstance(results[0].get('transcription_url'), str)):
+                            url = results[0]['transcription_url']
+                        else:
+                            shape.append('results:' + type(results).__name__)
+                    if url is None:
+                        error = c.CloudASRError('invalid_response', c._MESSAGES['invalid_response'],
+                                                stage='task_result_url')
+                        # Field names only: no provider text, value, id or URL.
+                        error.shape = ('output:' + ','.join(sorted(map(str, output))[:8])
+                                       + ';' + ';'.join(shape))[:300]
+                        raise error from None
                 else:
                     results = output.get('results')
                     if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
@@ -287,7 +412,16 @@ class _Session:
                     if results[0].get('subtask_status') != 'SUCCEEDED':
                         c._fail('task_failed')
                     url = results[0].get('transcription_url')
-                target = _storage_url(url, region, c, allow_http=filetrans)
+                try:
+                    target = _storage_url(url, region, c, allow_http=filetrans,
+                                          same_site=self.same_site)
+                except c.CloudASRError as exc:
+                    # The bare host name is not a secret and tells which origin
+                    # the task pointed at; path and signed query never leave.
+                    self.result_host = (urlsplit(url).hostname or '')[:253]
+                    exc.host = self.result_host
+                    exc.reason = getattr(exc, 'reason', None) or 'unnamed'
+                    raise
                 self.result_http = target['scheme'] == 'http'
                 self.private.append(url)
                 # Reject signing credentials even if the transcript echoes only
@@ -298,6 +432,7 @@ class _Session:
                 for (name, value), raw in zip(parse_qsl(query, strict_parsing=True), query.split('&')):
                     if name in secret_fields:
                         self.private.extend((value, raw.split('=', 1)[1]))
+              with _stage('result_download'):
                 return self.request(target, 'GET')
             if status in ('FAILED', 'CANCELED', 'CANCELLED', 'UNKNOWN'):
                 c._fail('task_failed')
@@ -308,10 +443,11 @@ class _Session:
             if attempt:
                 time.sleep(min(POLL_SECONDS, self.budget.remaining()))
                 self.budget.remaining()
-            obj = self.request(dict(self.config, path='/api/v1/tasks/' + task_id), 'GET', api_auth=True)
-            output = obj.get('output')
-            if not isinstance(output, dict) or output.get('task_id', task_id) != task_id:
-                c._fail('invalid_response')
+            with _stage('task_poll'):
+                obj = self.request(dict(self.config, path='/api/v1/tasks/' + task_id), 'GET', api_auth=True)
+                output = obj.get('output')
+                if not isinstance(output, dict) or output.get('task_id', task_id) != task_id:
+                    c._fail('invalid_response')
         c._fail('timeout')
 
     def result(self, obj):
@@ -399,4 +535,5 @@ def transcribe(audio_path, config, shared):
             c._fail('size_limit')
         oss_url, region = session.policy_upload(audio, path, identity, extension, region)
         obj = session.task(oss_url, region)
-        return session.result(obj)
+        with _stage('result_parse'):
+            return session.result(obj)

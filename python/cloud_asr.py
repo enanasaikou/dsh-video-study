@@ -28,8 +28,11 @@ CHUNK_BYTES = 64 * 1024
 
 
 class CloudASRError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, stage=None):
         self.code, self.message = code, message
+        # Which protocol stage failed: fixed module-owned names only, never
+        # provider text, URLs or identifiers.
+        self.stage = stage
         super().__init__(message)
 
 

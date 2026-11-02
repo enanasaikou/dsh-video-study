@@ -277,8 +277,8 @@ class AliyunTests(unittest.TestCase):
                host + '/result.json' + signed + '&redirect=https%3A%2F%2Fevil.invalid',
                RESULT + '&Signature=duplicate', RESULT + '#x',
                host + '/result.json?Expires=1&OSSAccessKeyId=k&Signature=x%0d%0aInjected',
-               host + '/result.json?Expires=1&OSSAccessKeyId=k&Signature=unescaped+plus',
-               host + '/result.json?Expires=1&OSSAccessKeyId=k&Signature=%252F',
+               host + '/result.json?Expires=1&OSSAccessKeyId=k&Signature=%00',
+               host + '/result.json?Expires=1&OSSAccessKeyId=k&Signature=%2',
                host + '/result.json', host + '/result.txt' + signed]
         for url in bad:
             with self.subTest(url=url):
@@ -575,6 +575,60 @@ class AliyunTests(unittest.TestCase):
                       Response({'output': dict(task_id=TASK_ID, task_status='SUCCEEDED',
                                                result=dict(transcription_url=RESULT))}),
                       Response(transcript()))
+        self.code('unsafe_provider_url', protocol='dashscope_paraformer', endpoint=relay, region='',
+                  model='qwen3-asr-flash-filetrans')
+
+
+    def test_gateway_hosted_result_is_fetched_without_credentials(self):
+        relay = 'https://maas.example-gateway.test/api/v1/services/audio/asr/transcription'
+        hosted = 'https://cdn.example-gateway.test/files/20261102/result.json'
+        self.sequence(Response(policy()), Response(b''),
+                      Response({'output': dict(task_id=TASK_ID, task_status='PENDING')}),
+                      Response({'output': dict(task_id=TASK_ID, task_status='SUCCEEDED',
+                                               result=dict(transcription_url=hosted))}),
+                      Response(transcript()))
+        out = self.invoke(protocol='dashscope_paraformer', endpoint=relay, region='',
+                          model='qwen3-asr-flash-filetrans')
+        fetched = self.connections[4]
+        self.assertEqual(fetched.destination, ('cdn.example-gateway.test', 443))
+        self.assertNotIn(KEY.encode(), b''.join(fetched.sent))
+        self.assertEqual(len(out['segments']), 2)
+        self.assertNotIn(hosted, json.dumps(out))
+
+    def test_result_query_accepts_oss_params_and_base64_plus(self):
+        relay = 'https://maas.example-gateway.test/api/v1/services/audio/asr/transcription'
+        url = ('https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/pre/20260901/result.json'
+               '?OSSAccessKeyId=FAKE&Expires=1999999999&Signature=a+b%2Fc%3D'
+               '&response-content-type=application%2Fjson&x-oss-process=style%2Fplain')
+        self.sequence(Response(policy()), Response(b''),
+                      Response({'output': dict(task_id=TASK_ID, task_status='PENDING')}),
+                      Response({'output': dict(task_id=TASK_ID, task_status='SUCCEEDED',
+                                               result=dict(transcription_url=url))}),
+                      Response(transcript()))
+        out = self.invoke(protocol='dashscope_paraformer', endpoint=relay, region='',
+                          model='qwen3-asr-flash-filetrans')
+        self.assertEqual(len(out['segments']), 2)
+
+    def test_result_query_still_rejects_unknown_and_duplicate_keys(self):
+        relay = 'https://maas.example-gateway.test/api/v1/services/audio/asr/transcription'
+        signed = '?Expires=1999999999&OSSAccessKeyId=FAKE&Signature=FAKE'
+        for suffix in ('&redirect=https%3A%2F%2Fevil.invalid', '&Signature=again',
+                       '&response-content-type=%00'):
+            with self.subTest(suffix=suffix):
+                self.connections.clear()
+                self.sequence(Response(policy()), Response(b''),
+                              Response({'output': dict(task_id=TASK_ID, task_status='PENDING')}),
+                              Response({'output': dict(task_id=TASK_ID, task_status='SUCCEEDED',
+                                                       result=dict(transcription_url=RESULT + suffix))}))
+                self.code('unsafe_provider_url', protocol='dashscope_paraformer', endpoint=relay,
+                          region='', model='qwen3-asr-flash-filetrans')
+
+    def test_alibaba_platform_hosts_never_inherit_gateway_trust(self):
+        relay = 'https://maas.example-gateway.test/api/v1/services/audio/asr/transcription'
+        self.sequence(Response(policy()), Response(b''),
+                      Response({'output': dict(task_id=TASK_ID, task_status='PENDING')}),
+                      Response({'output': dict(task_id=TASK_ID, task_status='SUCCEEDED',
+                                               result=dict(transcription_url='https://evil.aliyuncs.com/result.json'))}))
         self.code('unsafe_provider_url', protocol='dashscope_paraformer', endpoint=relay, region='',
                   model='qwen3-asr-flash-filetrans')
 

@@ -10,6 +10,7 @@ import io
 import json
 import math
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -17,6 +18,10 @@ from types import SimpleNamespace
 
 MODES = ('captions', 'cloud', 'local')
 LANGUAGES = ('en', 'zh', 'auto')
+# Protocol stage names are constants owned by the adapter modules; anything else
+# (provider text, ids, URLs) must never reach failure output.
+STAGE_NAME = re.compile(r'[a-z][a-z_]{0,39}')
+RESULT_HOST = re.compile(r'[a-z0-9](?:[a-z0-9.-]{1,251})[a-z0-9]')
 FALLBACK_CODES = {'no_captions', 'language_unavailable'}
 MESSAGES = {
     'invalid_input': '参数无效，请检查模式、语言和新的绝对输出目录。',
@@ -354,10 +359,21 @@ def cloud_extract(request, config, out, reason, downloader=None, transcriber=Non
                 'transcript_file': str(out / 'transcript.txt'), 'caption_kind': 'cloud_asr',
                 'language': metadata['language'], 'warnings': metadata['warnings'],
                 'content_verified': False, 'audio_uploaded': True}
-    except BaseException:
+    except BaseException as exc:
         if created:
             try:
+                stage = getattr(exc, 'stage', None)
+                shape = getattr(exc, 'shape', None)
+                host = getattr(exc, 'host', None)
+                reason = getattr(exc, 'reason', None)
                 write_json(out / 'failure.json', {'status': 'failed', 'success': False,
+                           'stage': stage if isinstance(stage, str) and STAGE_NAME.fullmatch(stage) else None,
+                           'shape': (shape[:300] if isinstance(shape, str)
+                                     and all(ch.isalnum() or ch in '_:,;-' for ch in shape) else None),
+                           'result_host': (host[:253] if isinstance(host, str)
+                                           and RESULT_HOST.fullmatch(host) else None),
+                           'result_reason': (reason if isinstance(reason, str)
+                                             and STAGE_NAME.fullmatch(reason) else None),
                            'note': ('云端转写未完成；可能已经向用户指定服务上传音频。'
                                     + ('阿里临时OSS约48小时后清理；远端任务可能继续并产生费用，未自动重提。' if native else '远端任务可能继续并产生费用，未自动重提。' if engine == 'tencent_rec_task' else ''))})
                 if raw is not None and not (out / 'raw-asr.json').exists():
@@ -445,7 +461,16 @@ def main():
         except ImportError:
             CloudASRError = ()
         if isinstance(exc, AudioSourceError) or (CloudASRError and isinstance(exc, CloudASRError)):
+            stage = getattr(exc, 'stage', None)
             result = {'status': exc.code, 'message': exc.message, 'success': False}
+            if isinstance(stage, str) and STAGE_NAME.fullmatch(stage):
+                result['stage'] = stage
+            host = getattr(exc, 'host', None)
+            if isinstance(host, str) and RESULT_HOST.fullmatch(host):
+                result['result_host'] = host
+            reason = getattr(exc, 'reason', None)
+            if isinstance(reason, str) and STAGE_NAME.fullmatch(reason):
+                result['result_reason'] = reason
         else:
             result = {'status': 'operation_failed', 'message': MESSAGES['operation_failed'], 'success': False}
     config = request.get('config') if isinstance(request, dict) else None

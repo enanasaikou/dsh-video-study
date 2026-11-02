@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-study",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "YouTube/B站字幕与课程资料：默认仅字幕、可选云端/本机ASR，DSH设置内B站扫码登录。" ,
   "type": "module",
   "main": "lib/index.js",

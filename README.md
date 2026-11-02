@@ -26,7 +26,7 @@ dsh plugin --profile desktop add github:enanasaikou/dsh-video-study
 # 在包目录的上一级
 dsh plugin --profile desktop add ./dsh-video-study
 # 或安装 .tgz
-dsh plugin --profile desktop add ./dsh-video-study-0.5.2.tgz
+dsh plugin --profile desktop add ./dsh-video-study-0.5.3.tgz
 ```
 
 装完重启或重载 profile。包用标准 `dsh.bundle.patch` + Cordis 工具插件 + bundled skill，兼容 `>=0.2.1-rc.5 <0.3.0`，只在 `0.2.1-rc.5` 验证过。
@@ -61,7 +61,9 @@ dsh plugin --profile desktop add ./dsh-video-study-0.5.2.tgz
 
 ## 设置 → 视频学习：B站登录
 
-在 **DSH 设置 → 视频学习** 里操作。登录和ASR配置放在同一标签；请用0.5.2或更新版本，升级后完整重载DSH，只刷新页面不一定能换后端代码。
+在 **DSH 设置 → 视频学习** 里操作。登录和ASR配置放在同一标签；请用0.5.3或更新版本，升级后完整重载DSH，只刷新页面不一定能换后端代码。
+
+0.5.3 让自建/转售网关（如 `maas.qianwenaiapi.com`）能真正跑通 Qwen 文件转写：任务成功后，结果地址不再只认阿里 OSS 地域桶，也接受应答该任务的同一站点（同主机或其子域，仍要 HTTPS、无账号口令、无端口、不跟跳转，且不带任何 API Key）。结果地址的查询串按 OSS 签名规则放宽：标准的 `response-*`、`x-oss-*` 参数与 Base64 里的 `+`、`%XX` 不再被判为非法，但仍拒绝未知键、重复键、控制字符和缺少签名组合的地址。失败时 `failure.json` 会记录 `stage`（upload_policy / upload_object / task_submit / task_poll / task_result_url / result_download / result_parse）、`shape`（应答字段名，不含值）和 `result_host`，便于区分是上传、提交、轮询还是结果解析出的问题；工具返回里不出现服务原文、URL 或任务 ID。
 
 0.5.2 让 `dashscope_paraformer`（阿里原生异步）协议支持 Qwen 文件转写模型：`qwen3-asr-flash-filetrans` 这类 `*filetrans` 模型走 `input.file_url` 单体提交、从 `output.result.transcription_url` 取结果，返回真实毫秒级分段，可处理长录音（同步 `qwen3-asr-flash` 走 OpenAI 兼容通道，单条上限 5 分钟、Base64 编码后 10MB）。服务返回的结果地址若是明文 `http`，只在该 filetrans 通道接受并写入 warning，其它协议仍要求 HTTPS。若把 `*filetrans` 模型配到 `dashscope_qwen` 协议，保存检查会直接报“协议与模型不匹配”，不再等云端返回无法解读的 4xx。用自建/转售网关时，存储桶可落在任意 `*.oss-<region>.aliyuncs.com` 地域，但结果地址必须与上传策略返回的地域一致。
 
