@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { readFile } from 'node:fs/promises';
 import { buildClient } from '../client/build.mjs';
 
 const FLOW = 'a'.repeat(36);
@@ -20,7 +19,7 @@ class Clock {
   }
 }
 async function moduleFixture({ fetch, React, clock } = {}) {
-  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
+  const source = await buildClient({ write: false });
   let registration;
   const required = [];
   const singleton = React || { createElement(type, props, ...children) { return { type, props, children }; } };
@@ -192,7 +191,7 @@ test('start transport timeout exceeds backend 15s budget and reports a fixed tim
   assert.equal(clock.tasks.size, 0);
 });
 
-test('artifact is reproducible, includes pinned MIT encoder and loads only host React', async () => {
+test('in-memory assembly is deterministic, includes pinned MIT encoder and loads only host React', async () => {
   const fixture = await moduleFixture();
   assert.equal(fixture.source, await buildClient({ write: false }));
   assert.match(fixture.source, /Copyright \(c\) 2009 Kazuhiko Arase/);
@@ -400,13 +399,18 @@ test('login view is concise, retains confirmation/memory-only warning, and never
   assert.equal(rendered.includes('iframe'), false);
 });
 
-test('same video-study tab contains concise login and ASR sections with one title', async () => {
-  const { exports } = await moduleFixture();
+test('video-study uses one title and independent mounted ASR, document and login tabpanels', async () => {
+  const React = { createElement(type, props, ...children) { return { type, props, children }; },
+    useRef() { return { current: [] }; }, useState(value) { return [value, () => {}]; } };
+  const { exports } = await moduleFixture({ React });
   const tree = exports._testing.VideoSettings();
   assert.equal(tree.children[0].type, 'h2');
   assert.equal(tree.children[0].children[0], '视频学习');
-  assert.equal(tree.children[1].type, exports._testing.LoginSettings);
-  assert.equal(tree.children[2].type, exports._testing.asr.Component);
+  assert.equal(tree.children[1].props.role, 'tablist');
+  const panels = tree.children[3];
+  assert.deepEqual(Array.from(panels, panel => panel.children[0].type),
+    [exports._testing.asr.Component, exports._testing.documents.Component, exports._testing.LoginSettings]);
+  assert.deepEqual(Array.from(panels, panel => panel.props.hidden), [false, true, true]);
 });
 
 test('idle login exposes only short buttons and hides cancel until active', async () => {

@@ -162,7 +162,7 @@ test('volatile update refreshes declared tool timeout without disposing the acti
   assert.equal(active.get('video_study_extract').timeoutMs, extractionBudgetMs({ mode: 'captions' }, 150));
   mode.set('cloud'); listeners['loader/volatile-update'](['mode']);
   assert.equal(active.get('video_study_extract').timeoutMs, extractionBudgetMs({ mode: 'cloud' }, 150));
-  assert.equal(registrations, 6); assert.equal(active.size, 3); assert.equal(disposed, false);
+  assert.equal(registrations, 8); assert.equal(active.size, 4); assert.equal(disposed, false);
   await effects[0](); assert.equal(disposed, true); assert.equal(active.size, 0);
 });
 
@@ -710,7 +710,7 @@ test('real process cancellation reaps the runner and its spawned descendant offl
   assert.equal(result.warnings.some(warning => warning.includes('finally')), true);
 });
 
-test('registration exposes exactly three tools and no API key schema input', async () => {
+test('registration exposes four focused tools and no API key schema input', async () => {
   const registered = [];
   let dispose;
   let provider;
@@ -724,7 +724,7 @@ test('registration exposes exactly three tools and no API key schema input', asy
       assert.deepEqual(names, ['skills']); callback({ skills: { registerProvider(getter) { provider = getter(); } } });
     } };
   applyPlugin(ctx, {}, { defineTool: value => value, runtimeFactory: () => runtime, rank: 600 });
-  assert.deepEqual(registered.map(tool => tool.name), ['video_study_status', 'video_study_extract', 'video_study_setup']);
+  assert.deepEqual(registered.map(tool => tool.name), ['video_study_status', 'video_study_extract', 'video_study_export', 'video_study_setup']);
   assert.equal(registered.some(tool => JSON.stringify(tool.parameters).includes('ApiKey')), false);
   assert.equal((await provider.list())[0].name, 'video-study');
   assert.equal((await provider.list())[0].rank, 600);
@@ -749,7 +749,12 @@ test('tool schema describes disabling-only captionsOnly and safe setup', () => {
   assert.equal('cloudUploadConsent' in extract.parameters, false);
   assert.equal('out' in extract.parameters, false);
   assert.deepEqual(extract.parameters.language.enum, ['en', 'zh', 'auto']);
-  assert.equal(definitions[2].name, 'video_study_setup');
+  assert.equal(definitions[2].name, 'video_study_export');
+  assert.match(definitions[2].description, /一个最终文件/);
+  assert.match(definitions[2].description, /识别字幕→改正字幕/);
+  assert.match(definitions[2].parameters.markdown.description, /不写补全理论或防御性长备注/);
+  assert.deepEqual(Object.keys(definitions[2].parameters), ['title', 'markdown', 'sourceUrl']);
+  assert.equal(definitions[3].name, 'video_study_setup');
   assert.equal(definitions[0].timeoutMs, 45000);
 });
 

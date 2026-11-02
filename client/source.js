@@ -3,7 +3,16 @@ function createVideoStudyClient(React, qrcode, platform) {
   'use strict';
   platform = platform || {};
   var e = React.createElement;
-  var asr = createAsrSettings(React, platform);
+  // Only confirmed, single-step same-page disjoint saves advance the sibling CAS revision.
+  // No config, credentials or draft values travel on this private event bus.
+  var settingsListeners = new Set();
+  var settingsSync = {
+    subscribe: function (listener) { settingsListeners.add(listener); return function () { settingsListeners.delete(listener); }; },
+    publish: function (event) { settingsListeners.forEach(function (listener) { listener(event); }); }
+  };
+  var settingsPlatform = Object.assign({}, platform, { settingsSync: settingsSync });
+  var asr = createAsrSettings(React, settingsPlatform);
+  var documents = createDocumentSettings(React, settingsPlatform);
   var MAX_COOKIE = 64 * 1024;
   var FLOW = /^[A-Za-z0-9_-]{8,128}$/;
   var safeErrors = new WeakMap();
@@ -243,7 +252,8 @@ function createVideoStudyClient(React, qrcode, platform) {
       cancelled: '已取消扫码。', success: '扫码已完成。' };
     var geometry;
     if (view.qr) { try { geometry = qrGeometry(view.qr.url); } catch (_) {} }
-    var buttonStyle = { padding: '7px 12px', borderRadius: 6, border: '1px solid #8886', cursor: 'pointer' };
+    var buttonStyle = { padding: '8px 12px', borderRadius: 6, border: '1px solid #8888', cursor: 'pointer',
+      color: 'inherit', background: '#8881', font: 'inherit' };
     function button(label, action, disabled) { return e('button', { type: 'button', style: buttonStyle,
       onClick: function () { void action(); }, disabled: disabled }, label); }
     return e('section', { 'aria-label': '视频学习登录设置', style: { display: 'grid', gap: 10 } },
@@ -270,8 +280,43 @@ function createVideoStudyClient(React, qrcode, platform) {
       view.error ? e('p', { role: 'alert' }, view.error) : null);
   }
   function VideoSettings() {
-    return e('div', { style: { maxWidth: 760, padding: 20, display: 'grid', gap: 24 } },
-      e('h2', { style: { margin: 0 } }, '视频学习'), e(LoginSettings), e(asr.Component));
+    var pair = React.useState('asr'), active = pair[0], setActive = pair[1];
+    var tabRefs = React.useRef([]);
+    var tabs = [{ id: 'asr', label: '字幕与ASR', component: asr.Component },
+      { id: 'documents', label: '文档输出', component: documents.Component },
+      { id: 'login', label: 'B站登录', component: LoginSettings }];
+    function activate(index, focus) {
+      setActive(tabs[index].id);
+      if (focus && tabRefs.current[index]) tabRefs.current[index].focus();
+    }
+    function keydown(event, index) {
+      var next;
+      if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+      else if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = tabs.length - 1;
+      else return;
+      event.preventDefault(); activate(next, true);
+    }
+    return e('div', { style: { maxWidth: 820, width: '100%', boxSizing: 'border-box', padding: '20px clamp(10px, 3vw, 24px)',
+      color: 'inherit', display: 'grid', gap: 16, minWidth: 0, lineHeight: 1.6 } },
+      e('h2', { style: { margin: 0, fontSize: 22 } }, '视频学习'),
+      e('div', { role: 'tablist', 'aria-label': '视频学习设置', 'aria-orientation': 'horizontal',
+        style: { display: 'flex', flexWrap: 'wrap', gap: 6, borderBottom: '1px solid #8885', paddingBottom: 10 } },
+        tabs.map(function (tab, index) { var selected = active === tab.id;
+          return e('button', { key: tab.id, type: 'button', role: 'tab', id: 'video-study-tab-' + tab.id,
+            'aria-selected': selected, 'aria-controls': 'video-study-panel-' + tab.id, tabIndex: selected ? 0 : -1,
+            ref: function (node) { tabRefs.current[index] = node; }, onClick: function () { activate(index, false); },
+            onKeyDown: function (event) { keydown(event, index); },
+            style: { color: 'inherit', font: 'inherit', fontWeight: selected ? 650 : 400, cursor: 'pointer',
+              padding: '8px 14px', borderRadius: 7, border: selected ? '1px solid currentColor' : '1px solid transparent',
+              background: selected ? '#8882' : 'transparent' } }, tab.label); })),
+      e('p', { style: { margin: 0, fontSize: 13, opacity: 0.8 } }, '各页独立保存；切换标签保留未保存草稿，关闭设置或刷新页面前请先保存。'),
+      // Keep every panel mounted: hiding a tab must not dispose its controller or password draft.
+      tabs.map(function (tab) { return e('div', { key: tab.id, role: 'tabpanel', id: 'video-study-panel-' + tab.id,
+        'aria-labelledby': 'video-study-tab-' + tab.id, hidden: active !== tab.id, tabIndex: 0,
+        style: { display: active === tab.id ? 'block' : 'none', minWidth: 0, padding: 'clamp(12px, 3vw, 20px)',
+          border: '1px solid #8885', borderRadius: 10, background: '#8881' } }, e(tab.component)); }));
   }
   return { inject: ['slots'], apply: function (ctx) {
     ctx.slots.inject('settings.section', function () {
@@ -279,5 +324,5 @@ function createVideoStudyClient(React, qrcode, platform) {
         label: '视频学习', inject: function () { return {}; } }, VideoSettings);
     });
   }, _testing: { createAuthController: createAuthController, qrGeometry: qrGeometry,
-    LoginSettings: LoginSettings, VideoSettings: VideoSettings, asr: asr._testing, requestAction: requestAction } };
+    LoginSettings: LoginSettings, VideoSettings: VideoSettings, asr: asr._testing, documents: documents._testing, requestAction: requestAction } };
 }

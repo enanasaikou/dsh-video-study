@@ -25,7 +25,7 @@ class Response:
 
 class Tests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='bili-skill-test-', dir=str(Path.cwd()))
+        self.temp = tempfile.TemporaryDirectory(prefix='bili-skill-test-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.cookie = self.root / 'fake_cookie.json'

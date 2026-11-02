@@ -7,8 +7,8 @@ YouTube / B站字幕与课程学习插件。默认只取已有字幕；要用语
 | `mode` | 行为 | 本机额外要求 |
 |---|---|---|
 | `captions`（默认） | 只用现有字幕；无源语言字幕就停止，不下载音轨、不跑 ASR | 无 |
-| `cloud` | 字幕优先；需 ASR 时上传到配置的转写服务 | 服务账号与上传授权，可能收费 |
-| `local` | 字幕优先；需 ASR 时用本机 faster-whisper | 可选 ASR 环境与本地模型 |
+| `cloud_ASR` | 字幕优先；需 ASR 时上传到配置的转写服务 | 服务账号与上传授权，可能收费 |
+| `local_ASR` | 字幕优先；需 ASR 时用本机 faster-whisper | 可选 ASR 环境与本地模型 |
 
 所有模式都要 Python 3.10+。YouTube 提取依赖 yt-dlp，B站字幕和云端只用标准库。插件不打包 Node、Python、ffmpeg、模型或宿主 SDK。火山引擎协议只收 WAV/MP3/OGG OPUS，其它格式（B站常见的 m4a/AAC、webm 等）需要本机已有的 ffmpeg 做一次本地转码：插件只调用你 PATH 上的 ffmpeg，输出 16 kHz 单声道 64 kbps MP3 到任务临时目录，不联网、不截断、不改变平台时长；找不到 ffmpeg 就报缺依赖，不会把后缀改掉伪装上传。
 
@@ -20,15 +20,6 @@ YouTube / B站字幕与课程学习插件。默认只取已有字幕；要用语
 dsh plugin --profile desktop add github:enanasaikou/dsh-video-study
 ```
 
-公开仓库可匿名安装；私有仓库要求本机已有该仓库的 git 访问凭据。也可以先 clone 再本地安装，或安装 release 里的 `.tgz`：
-
-```sh
-# 在包目录的上一级
-dsh plugin --profile desktop add ./dsh-video-study
-# 或安装 .tgz
-dsh plugin --profile desktop add ./dsh-video-study-0.5.3.tgz
-```
-
 装完重启或重载 profile。包用标准 `dsh.bundle.patch` + Cordis 工具插件 + bundled skill，兼容 `>=0.2.1-rc.5 <0.3.0`，只在 `0.2.1-rc.5` 验证过。
 
 安装不装 pip 包、不下载模型、不读浏览器 Cookie、不上传音频、不访问 API。各电脑填自己的配置；不要打包分享密钥、Cookie、模型或虚拟环境。
@@ -37,7 +28,7 @@ dsh plugin --profile desktop add ./dsh-video-study-0.5.3.tgz
 
 1. 装插件并重载 profile。
 2. 打开 **DSH 设置 → 视频学习**，模式选「仅现有字幕」先跑一个视频，确认 Python 与 B站登录态正常（`video_study_status` 可离线自检）。
-3. 需要语音识别时再切到「云端 ASR」或「本机 ASR」，按下面的配置节填写并**勾选上传授权**。
+3. 视频本身没有字幕或者字母不可靠，需要语音识别时再切到「云端 ASR」或「本机 ASR」，按下面的配置节填写并**勾选上传授权**。
 4. 长课程（30 分钟这种）请选异步协议，例如预设「阿里 Qwen 文件转写（长录音）」：同步接口通常只有 5 分钟 / 10 MB 的单条上限。
 
 ## 隐私与数据流
@@ -47,21 +38,21 @@ dsh plugin --profile desktop add ./dsh-video-study-0.5.3.tgz
 ## 兼容性与验证范围
 
 - 宿主：DSH `>=0.2.1-rc.5 <0.3.0`，Node `>=22.19.0`，Python 3.10+。
-- 本版本经过**离线**验证：Node 224 项、Python 351 项、宿主桥接 62 + 78 项检查、打包与归档校验；**尚未**对真实云端服务完成契约验收（各家的上传策略、结果域名、错误码仍可能变化）。
+- 验证覆盖离线 Node/Python 回归、宿主桥接与归档校验；文档导出另有真实 DOCX/OMML 生成与重开检查。离线测试不等于浏览器实测，也不代表所有云服务均完成契约验收（各家的上传策略、结果域名、错误码仍可能变化）。
 - 云端服务侧的变化由服务方决定；遇到不可解读的失败，插件只报固定错误码，不回显服务原始响应，也不会自动重试或重复提交收费任务。
 
 ## 工具
 
 - `video_study_status`：离线检查 Python、模式与静态配置，不联网，无参数。
 - `video_study_extract`：先取现有字幕，按设置决定是否后备 ASR。参数 `target`、`language`、`forceAsr`、`reason`、`captionsOnly`。
+- `video_study_export`：把助手已整理的正文导出为 Word / Markdown / TXT。参数 `title`、`markdown`、可选 `sourceUrl`；输出目录和格式只取设置，不接受工具参数覆盖，不读 ASR 密钥或 B站会话，不上传音频。
 - `video_study_setup`：只生成环境部署命令，用户检查后手动执行。参数 `backend`、`model`。
 - 技能 `video-study`：随包注册，指导阅读、核对、翻译与课程译写。
 
-插件不自动替换旧的 `youtube-study-notes` / `video-course-handouts`。
 
 ## 设置 → 视频学习：B站登录
 
-在 **DSH 设置 → 视频学习** 里操作。登录和ASR配置放在同一标签；请用0.5.3或更新版本，升级后完整重载DSH，只刷新页面不一定能换后端代码。
+在 **DSH 设置 → 视频学习** 里操作。0.6.0 起分为「字幕与ASR」「文档输出」「B站登录」三个独立子标签，切换保留各自草稿。升级后完整重载 DSH，再刷新页面；只刷新页面不一定能换后端代码。
 
 0.5.3 让自建/转售网关（如 `maas.qianwenaiapi.com`）能真正跑通 Qwen 文件转写：任务成功后，结果地址不再只认阿里 OSS 地域桶，也接受应答该任务的同一站点（同主机或其子域，仍要 HTTPS、无账号口令、无端口、不跟跳转，且不带任何 API Key）。结果地址的查询串按 OSS 签名规则放宽：标准的 `response-*`、`x-oss-*` 参数与 Base64 里的 `+`、`%XX` 不再被判为非法，但仍拒绝未知键、重复键、控制字符和缺少签名组合的地址。失败时 `failure.json` 会记录 `stage`（upload_policy / upload_object / task_submit / task_poll / task_result_url / result_download / result_parse）、`shape`（应答字段名，不含值）和 `result_host`，便于区分是上传、提交、轮询还是结果解析出的问题；工具返回里不出现服务原文、URL 或任务 ID。
 
@@ -88,6 +79,26 @@ dsh plugin --profile desktop add ./dsh-video-study-0.5.3.tgz
 不要分享二维码截图、Cookie 或凭据备份。
 
 扫码走 B站网页接口，不是官方 OAuth，接口可能改版或触发风控。扫码和登录检查只支持直连，配置 `proxy` 会报不支持；字幕和音轨通道仍按 `proxy` 工作。YouTube 公开课程默认匿名，不用 Google 登录或 B站会话；`youtubeCookieFile` 仅为兼容保留，默认空。
+
+## 文档输出（0.6.0）
+
+在 **DSH 设置 → 视频学习 → 文档输出** 选择默认格式和本机绝对目录，保存后用于下一次 `video_study_export`。留空默认使用运行插件用户的 `Documents/DSH视频学习`（并非浏览器下载目录；不解析系统重定向的 Documents 位置）。保存设置不创建目录、不导出、不修改 ASR 密钥或上传授权。
+
+- 支持 Word `.docx`（默认）、Markdown `.md`、纯文本 `.txt`；不支持 PDF。MD 保留原 Markdown/LaTeX，TXT 去有限 Markdown 结构并保留 LaTeX。
+- 助手须先通读材料并整理课程正文，再调用导出；工具不负责翻译、核对原声或验证理论，不把原始字幕自动改写成讲义。
+- 0.6.1 起随包技能与导出工具提示：备注只写必要的“识别字幕 → 改正字幕”，不因讲者说得不全面而追加条件、反例或“可能……并不意味着……”式长说明。仅订正明确错误；不确定不硬改。
+- 默认只交付设置格式的一个最终文件，不附送源稿、测试文件、报告或安装包；临时草稿和验证文件放系统临时目录并清理，只清理本任务自建文件，不删除原始字幕、历史资料或插件。
+- Word 采用标题层级与原生可编辑 OMML 公式；仅支持有限 Markdown/LaTeX 子集（分式、上下标、平方根、常用希腊字母等）。未知语法完整保留原式并给出 `formula_unsupported` 警告，不猜测公式。公式转换成功不等于内容正确。
+- 标题不超过200字符；整个 UTF-8 JSON 请求不超过2 MiB。公式超语法/资源预算时保留原文或停止，不静默截断；超出单文件预算时先与用户确认范围，不擅自拆成多份交付。
+- 导出使用随机后缀新文件，绝不覆盖旧稿。拒绝相对路径、网络/设备路径、父路径穿越及符号链接/reparse父链；不读取或抓取正文中的图片、链接、脚本和远端资源。
+- Markdown/TXT 只需标准库。Word 另需插件实际使用的 Python 环境中有 `python-docx`；缺依赖就停止，不自动安装。可先核对解释器，再**手动**运行：
+
+```sh
+# 在插件包目录运行；python须替换成设置中实际使用的Python解释器
+python -m pip install -r python/requirements-document.txt
+```
+
+来源链接是显示用的公开链接，不会访问；只接受无凭据/签名的 HTTP(S) 地址及有限 `p`/`v` 参数。正文、标题和公式均为不可信文本，不作命令执行；原始字幕与 ASR 稿保持不变。
 
 ## 配置
 
@@ -186,7 +197,7 @@ node scripts/check-package.mjs
 # 用 npm / pnpm pack 生成标准包；没有 prepare/postinstall 生命周期脚本
 ```
 
-Python 测试离线跑 fixture；Node 测试含进程树取消和 SDK 注入边界。
+Python 测试离线跑 fixture；Node 测试含进程树取消和 SDK 注入边界。Python 入口把本次测试放入独占临时目录，结束时清理并恢复 TEMP/TMP/TMPDIR 与 tempfile 缓存；临时目录不可用时拒绝回退到工作区。需要时显式将 TEMP/TMP/TMPDIR 指向可写的专用临时根目录。
 
 发布前确认包名可用、补仓库信息、审核许可；可分享源码或 tgz。不要上传 stateDir、配置、输出、依赖或模型。`registerSkill: false` 时不注册随包技能（默认 true）。
 

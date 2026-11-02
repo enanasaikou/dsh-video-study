@@ -148,6 +148,12 @@ function createAsrSettings(React, platform) {
         secretConfigured: value.secretConfigured === true, secretAction: 'keep', secretDraftPresent: false,
         secretEpoch: state.secretEpoch + 1, conflict: false, error: '', notice: notice || '', result: null, command: '' });
     }
+    var unsubscribeSettings = platform.settingsSync ? platform.settingsSync.subscribe(function (event) {
+      if (disposed || !state.values || state.loading || state.busy || state.conflict || state.revision !== event.previousRevision
+          || event.revision !== event.previousRevision + 1
+          || event.fields.some(function (key) { return keys.indexOf(key) >= 0; }) || event.secretChanged) return;
+      emit({ revision: event.revision });
+    }) : function () {};
     function editable() { return !disposed && !!state.values && !state.loading && !state.busy && !state.conflict; }
     function requireSaved() {
       if (disposed) return false;
@@ -211,7 +217,12 @@ function createAsrSettings(React, platform) {
         if (secret.action === 'set') secret.value = secretValue;
         var body = { revision: state.revision, patch: patch, secret: secret };
         emit({ busy: true, error: '', notice: '' });
-        try { accept(await call('save', 'POST', body), '已保存。'); return !disposed; }
+        try {
+          accept(await call('save', 'POST', body), '已保存。');
+          if (!disposed && platform.settingsSync && state.revision === body.revision + 1) platform.settingsSync.publish({ previousRevision: body.revision,
+            revision: state.revision, fields: Object.keys(patch), secretChanged: secret.action !== 'keep' });
+          return !disposed;
+        }
         catch (error) {
           var conflict = errorCode(error) === 'settings_conflict';
           if (conflict) secretValue = '';
@@ -240,7 +251,7 @@ function createAsrSettings(React, platform) {
         } catch (_) { emit({ error: '无法自动复制，请手动选择命令复制。' }); return false; }
       },
       dispose: function () {
-        disposed = true; secretValue = ''; listeners.clear(); pending.forEach(function (controller) { controller.abort(); }); pending.clear();
+        disposed = true; unsubscribeSettings(); secretValue = ''; listeners.clear(); pending.forEach(function (controller) { controller.abort(); }); pending.clear();
         state = Object.assign({}, state, { secretDraftPresent: false, secretAction: 'keep', command: '' });
       },
     };
@@ -259,7 +270,9 @@ function createAsrSettings(React, platform) {
     var disabled = view.loading || view.busy || view.conflict || !view.values;
     function run(name) { return function () { if (controllerRef.current) void controllerRef.current[name](); }; }
     function change(key, value) { if (controllerRef.current) controllerRef.current.update(key, value); }
-    var fieldStyle = { display: 'grid', gap: 5 }, inputStyle = { padding: '7px 8px', minWidth: 0, border: '1px solid #8886', borderRadius: 5 };
+    var fieldStyle = { display: 'grid', gap: 5, minWidth: 0 }, inputStyle = { padding: '8px 10px', minWidth: 0,
+      width: '100%', boxSizing: 'border-box', color: 'inherit', background: 'transparent', font: 'inherit',
+      border: '1px solid #8888', borderRadius: 6 };
     function input(key, label, type) { return e('label', { style: fieldStyle }, label,
       e('input', { type: type || 'text', style: inputStyle, value: draft[key], disabled: disabled, autoComplete: 'off',
         onChange: function (event) { var value = event.currentTarget.value;
@@ -270,14 +283,14 @@ function createAsrSettings(React, platform) {
         e('select', { style: inputStyle, value: unloadedMode ? '' : draft[key], disabled: disabled,
           onChange: function (event) { change(key, event.currentTarget.value); } },
           unloadedMode ? e('option', { key: 'not-loaded', value: '', disabled: true }, view.loading ? '读取设置中…' : '设置未载入') : null,
-          choices.map(function (choice) { return e('option', { key: choice[0], value: choice[0] }, choice[1]); })));
+          choices.map(function (choice) { return e('option', { key: choice[0], value: choice[0], style: { color: 'CanvasText', background: 'Canvas' } }, choice[1]); })));
     }
     function checkbox(key, label) { return e('label', null,
       e('input', { type: 'checkbox', checked: draft[key] === true, disabled: disabled,
         onChange: function (event) { change(key, event.currentTarget.checked); } }), ' ', label); }
-    function button(label, name, off) { return e('button', { type: 'button', disabled: off, onClick: run(name), style: { padding: '7px 12px' } }, label); }
+    function button(label, name, off) { return e('button', { type: 'button', disabled: off, onClick: run(name), style: { padding: '8px 12px', color: 'inherit', background: '#8881', font: 'inherit', border: '1px solid #8888', borderRadius: 6, cursor: 'pointer' } }, label); }
     return e('section', { 'aria-label': '字幕与ASR', style: { display: 'grid', gap: 12 } },
-      e('h3', null, '字幕与ASR'),
+      e('h3', { style: { margin: 0, fontSize: 18 } }, '字幕与ASR'),
       select('mode', '模式', [['captions', '仅现有字幕'], ['cloud', '云端ASR'], ['local', '本机ASR']]),
       select('defaultLanguage', '语言', [['auto', '自动'], ['zh', '中文'], ['en', '英语']]),
       view.loading ? e('p', { role: 'status' }, '读取设置中…') : !view.values ? e('p', { role: 'status' }, '设置未载入') : null,
@@ -285,7 +298,7 @@ function createAsrSettings(React, platform) {
       activeMode === 'cloud' ? e('div', { style: { display: 'grid', gap: 10 } },
         e('label', { style: fieldStyle }, '快捷填入（可选，不会自动保存）', e('select', { style: inputStyle, defaultValue: '', disabled: disabled,
           onChange: function (event) { if (controllerRef.current) controllerRef.current.applyPreset(event.currentTarget.value); } },
-          e('option', { value: '', disabled: true }, '选择预设或自定义'), Object.keys(presets).map(function (id) { return e('option', { key: id, value: id }, presets[id].label); }))),
+          e('option', { value: '', disabled: true }, '选择预设或自定义'), Object.keys(presets).map(function (id) { return e('option', { key: id, value: id, style: { color: 'CanvasText', background: 'Canvas' } }, presets[id].label); }))),
         input('cloudProviderName', '服务名称（自定义）'),
         select('cloudProtocol', '接口协议', [['auto', '自动兼容旧设置'], ['openai', 'OpenAI兼容文件转写'], ['dashscope_paraformer', 'DashScope Paraformer异步'],
           ['dashscope_qwen', 'Qwen-ASR聊天接口'], ['volcengine_flash', '火山 / 豆包极速识别'], ['tencent_rec_task', '腾讯云录音识别TC3']]),

@@ -29,6 +29,10 @@ assert.ok(login.includes('哔哩哔哩下载字幕需要登录，Cookie仅供B�
 assert.ok(!login.includes('来源：')&&!login.includes('尚未检查登录有效性'));
 const asr=JSON.stringify(client._testing.asr.Component());
 for(const label of ['字幕与ASR','仅现有字幕','云端ASR','本机ASR','保存设置'])assert.ok(asr.includes(label));
+const documents=JSON.stringify(client._testing.documents.Component());
+for(const label of ['文档输出','默认文档格式','保存文档设置','Markdown','纯文本'])assert.ok(documents.includes(label));
+const tabs=JSON.stringify(client._testing.VideoSettings());
+for(const label of ['字幕与ASR','文档输出','B站登录','tabpanel'])assert.ok(tabs.includes(label));
 for(const host of ['account.bilibili.com','passport.bilibili.com']){const matrix=client._testing.qrGeometry('https://'+host+'/offline-test?fixture=NOT-A-LOGIN');assert.ok(matrix.size>20&&matrix.path.length>100);}
 console.log(JSON.stringify({status:'passed',kind:'client_only',sdkProbeRun:false,liveGuiTested:false,settingsSection:entries[0].id,asrSettingsPresent:true,loginCopySimplified:true,exactQrHosts:['account.bilibili.com','passport.bilibili.com']}));
 """

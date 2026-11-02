@@ -79,6 +79,26 @@ function routes(f = fixture(), { readTimeoutMs = 5000, ...changes } = {}) {
   return { ...f, handlers, registrations, request };
 }
 
+test('document defaults and partial saves preserve cloud key, authorization and unrelated settings', async () => {
+  const f = fixture();
+  f.own.cloudUploadConsent = true;
+  const initial = await f.repository.read();
+  assert.equal(initial.values.documentFormat, 'docx');
+  assert.equal(initial.values.documentOutputDir, '');
+  await f.repository.save({ revision: 4, patch: { documentFormat: 'md', documentOutputDir: 'D:\\课程文档' } });
+  assert.equal(f.own.cloudApiKey, SECRET); assert.equal(f.own.cloudUploadConsent, true);
+  assert.equal(f.own.documentFormat, 'md');
+  assert.deepEqual(f.calls.mutate[0].ops.map(op => op.path[0]), ['documentFormat', 'documentOutputDir']);
+});
+
+test('document settings reject unsupported formats and nonlocal/relative/traversing paths', async () => {
+  for (const patch of [{ documentFormat: 'pdf' }, { documentOutputDir: 'relative' },
+    { documentOutputDir: '\\\\server\\share' }, { documentOutputDir: 'D:/safe/../other' }, { documentOutputDir: 'D:\\x\n' }]) {
+    const f = fixture(); await code(f.repository.save({ revision: 4, patch }), 'invalid_input');
+    assert.equal(f.calls.mutate.length, 0);
+  }
+});
+
 test('own fiber namespace is located without exposing any other descriptor or secrets', async () => {
   const f = fixture(), result = await f.repository.read();
   assert.equal(result.status, 'ok'); assert.equal(result.revision, 4);
