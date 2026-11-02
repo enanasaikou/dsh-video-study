@@ -1,0 +1,13 @@
+# 统一用 LF 存进仓库，避免 Windows 上出现整文件改动
+* text=auto eol=lf
+
+*.py  text eol=lf
+*.mjs text eol=lf
+*.js  text eol=lf
+*.md  text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+
+# 二进制
+*.tgz  binary
+*.zip  binary
