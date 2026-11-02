@@ -1,0 +1,40 @@
+{
+  "name": "dsh-video-study",
+  "version": "0.5.2",
+  "description": "YouTube/B站字幕与课程资料：默认仅字幕、可选云端/本机ASR，DSH设置内B站扫码登录。" ,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": { ".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json" },
+  "license": "MIT",
+  "keywords": ["dsh-plugin", "deepseek-harness", "youtube", "bilibili", "subtitle", "asr"],
+  "engines": { "node": ">=22.19.0", "dsh": ">=0.2.1-rc.5 <0.3.0" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-settings-general"] }
+  },
+  "files": ["lib", "python", "skills", "client/vendor/LICENSE.qrcode-generator", "client/vendor/README.md", "cordis.patch.yml", "LICENSE", "LICENSE-UPSTREAM", "THIRD_PARTY_NOTICES.md", "README.md"],
+  "scripts": {
+    "test": "node --test",
+    "build:client": "node client/build.mjs",
+    "test:python": "python -B scripts/test_python.py",
+    "check:package": "node scripts/check-package.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-skill": "*",
+    "@deepseek-ai/dsh-credentials": "*",
+    "@deepseek-ai/dsh-client-ui-settings-general": "*",
+    "react": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/dsh-skill": { "optional": true },
+    "@deepseek-ai/dsh-credentials": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-settings-general": { "optional": true },
+    "react": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true }
+  }
+}

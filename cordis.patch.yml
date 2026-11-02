@@ -1,0 +1,7 @@
+- insert:
+    - id: video-study
+      name: dsh-video-study
+      config:
+        mode: captions
+        defaultLanguage: auto
+        cloudUploadConsent: false

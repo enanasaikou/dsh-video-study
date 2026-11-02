@@ -1,0 +1,28 @@
+# 依赖与构建产物
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+*.tgz
+
+# 本地运行产物与临时目录
+tmp-run/
+tmp/
+*.log
+dsh-*/
+*-report.json
+failures/
+
+# 本机配置与凭据（绝不入库）
+cordis.patch.local.yml
+config.local.*
+*.secret
+*.key.pem
+cookies*.json
+
+# 操作系统
+Thumbs.db
+desktop.ini
+.DS_Store

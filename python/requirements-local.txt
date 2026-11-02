@@ -1,0 +1,3 @@
+# Optional local ASR only; model is separate. Not a complete transitive lockfile.
+-r requirements.txt
+faster-whisper==1.2.1
