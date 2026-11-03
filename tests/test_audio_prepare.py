@@ -114,7 +114,13 @@ class Tests(unittest.TestCase):
         self.assertEqual(process.kwargs['stdin'], subprocess.DEVNULL)
         self.assertEqual(process.kwargs['stdout'], subprocess.DEVNULL)
         self.assertEqual(process.kwargs['stderr'], subprocess.DEVNULL)
-        self.assertEqual(process.kwargs['env'], {})
+        child_env = process.kwargs['env']
+        self.assertEqual(set(child_env), {'TMP', 'TEMP', 'TMPDIR'})
+        scratch = Path(child_env['TMP'])
+        self.assertEqual(set(child_env.values()), {str(scratch)})
+        self.assertEqual(scratch.parent, self.directory)
+        self.assertEqual(process.kwargs['cwd'], str(scratch))
+        self.assertFalse(scratch.exists())
         self.assertIs(process.kwargs['shell'], False)
         self.assertEqual(path.suffix, '.mp3')
         self.assertEqual(path.read_bytes(), MP3)
@@ -205,7 +211,13 @@ class Tests(unittest.TestCase):
     def test_empty_key_environment_cannot_inherit_credentials(self):
         _, source = self.invoke()
         process = Process.instances[0]
-        self.assertEqual(process.kwargs['env'], {})
+        child_env = process.kwargs['env']
+        self.assertEqual(set(child_env), {'TMP', 'TEMP', 'TMPDIR'})
+        scratch = Path(child_env['TMP'])
+        self.assertEqual(set(child_env.values()), {str(scratch)})
+        self.assertEqual(scratch.parent, self.directory)
+        self.assertEqual(process.kwargs['cwd'], str(scratch))
+        self.assertFalse(scratch.exists())
         dumped = json.dumps({'argv': process.argv, 'env': process.kwargs['env']})
         self.assertNotIn(KEY, dumped)
         self.assertNotIn('PRIVATE_TITLE', dumped)

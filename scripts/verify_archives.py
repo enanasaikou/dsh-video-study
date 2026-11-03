@@ -17,9 +17,9 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 CLIENT_PROBE = r"""
-import fs from 'node:fs';import path from 'node:path';import vm from 'node:vm';import assert from 'node:assert/strict';
+import fs from 'node:fs';import path from 'node:path';import vm from 'node:vm';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
 const root=process.argv[1];let client;
-const React={createElement:(type,props,...children)=>({type,props,children}),useState:v=>[v,()=>{}],useRef:v=>({current:v}),useEffect:()=>{}};
+const React={createElement:(type,props,...children)=>({type,props,children}),useState:v=>[v&&v.draft?{...v,loading:false,values:{...v.draft,mode:'cloud'},draft:{...v.draft,mode:'cloud'}}:v,()=>{}],useRef:v=>({current:v}),useEffect:()=>{}};
 vm.runInNewContext(fs.readFileSync(path.join(root,'lib/client.js'),'utf8'),{window:{__ModuleLoader__:{load:d=>{client=d.factory(n=>{assert.equal(n,'react');return React;});}}},URL,AbortController,TextEncoder,setTimeout,clearTimeout});
 const entries=[];client.apply({slots:{inject:(name,fn)=>fn(),register:(entry,component)=>{entries.push(entry);return()=>{};}}});
 assert.equal(entries[0].id,'video-study');
@@ -28,13 +28,28 @@ const login=JSON.stringify(client._testing.LoginSettings());
 assert.ok(login.includes('哔哩哔哩下载字幕需要登录，Cookie仅供B站请求使用。'));
 assert.ok(!login.includes('来源：')&&!login.includes('尚未检查登录有效性'));
 const asr=JSON.stringify(client._testing.asr.Component());
-for(const label of ['字幕与ASR','仅现有字幕','云端ASR','本机ASR','保存设置'])assert.ok(asr.includes(label));
+for(const label of ['字幕与ASR','仅现有字幕','云端ASR','保存设置'])assert.ok(asr.includes(label));
+for(const label of ['本机ASR','localModel','localModelDir','localDevice','localComputeType','快捷填入','选择预设或自定义'])assert.ok(!asr.includes(label),'removed UI control remains: '+label);
+assert.deepEqual(Object.keys(client._testing.asr.defaults).filter(name=>/^local(Model|Device|Compute)/.test(name)),[]);
+for(const label of ['一键准备运行环境','隔离 Python 环境'])assert.ok(asr.includes(label),'one-click install control missing: '+label);
 const documents=JSON.stringify(client._testing.documents.Component());
 for(const label of ['文档输出','默认文档格式','保存文档设置','Markdown','纯文本'])assert.ok(documents.includes(label));
 const tabs=JSON.stringify(client._testing.VideoSettings());
 for(const label of ['字幕与ASR','文档输出','B站登录','tabpanel'])assert.ok(tabs.includes(label));
 for(const host of ['account.bilibili.com','passport.bilibili.com']){const matrix=client._testing.qrGeometry('https://'+host+'/offline-test?fixture=NOT-A-LOGIN');assert.ok(matrix.size>20&&matrix.path.length>100);}
-console.log(JSON.stringify({status:'passed',kind:'client_only',sdkProbeRun:false,liveGuiTested:false,settingsSection:entries[0].id,asrSettingsPresent:true,loginCopySimplified:true,exactQrHosts:['account.bilibili.com','passport.bilibili.com']}));
+assert.ok(documents.includes('当前会话工作区'));
+const {createRuntime}=await import(pathToFileURL(path.join(root,'lib/runtime.mjs')));
+const runtime=createRuntime({}, {spawnImpl:()=>assert.fail('artifact probe must not spawn Python'),createScratchImpl:()=>assert.fail('artifact probe must not write')});
+try {
+  const required=await runtime.extract({target:'abcdefghijk'});
+  assert.equal(required.status,'output_style_required');
+  assert.deepEqual(required.choices.map(item=>item.label),['原文（完全复述）','简要压缩','总结']);
+  assert.equal((await runtime.extract({target:'abcdefghijk',outputStyle:'verbatim'})).status,'workspace_required');
+  assert.equal((await runtime.setupInstall({unexpected:true})).status,'invalid_input');
+  assert.equal(runtime.setupInstallStatus().status,'idle');
+  assert.equal(typeof runtime.setupInstall,'function');
+} finally {await runtime.dispose();}
+console.log(JSON.stringify({status:'passed',kind:'client_only',sdkProbeRun:false,liveGuiTested:false,settingsSection:entries[0].id,asrSettingsPresent:true,loginCopySimplified:true,outputStyleGate:true,workspaceDefaultGuard:true,installGate:true,exactQrHosts:['account.bilibili.com','passport.bilibili.com']}));
 """
 
 

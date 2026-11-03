@@ -80,33 +80,39 @@ class RunnerTests(unittest.TestCase):
                 'config': config or {}, **extra}
 
     def test_default_caption_success_no_asr(self):
-        local, cloud = Mock(), Mock()
-        result = runner.dispatch(self.request(), caption_ok, local, cloud)
+        cloud = Mock()
+        result = runner.dispatch(self.request(), caption_ok, cloud)
         self.assertEqual(result['status'], 'ok')
         self.assertFalse(result['audio_downloaded'])
         self.assertFalse(result['audio_uploaded'])
         self.assertFalse(result['content_verified'])
-        local.assert_not_called()
         cloud.assert_not_called()
 
     def test_default_missing_captions_does_not_enable_asr(self):
-        local, cloud = Mock(), Mock()
-        result = runner.dispatch(self.request(), no_captions, local, cloud)
+        cloud = Mock()
+        result = runner.dispatch(self.request(), no_captions, cloud)
         self.assertEqual(result['status'], 'no_captions')
         self.assertFalse(result['asr_attempted'])
-        local.assert_not_called()
         cloud.assert_not_called()
         self.assertFalse(self.out.exists())
 
     def test_cloud_incomplete_config_still_allows_published_captions(self):
         result = runner.dispatch(self.request({'mode': 'cloud', 'cloudUploadConsent': False}), caption_ok,
-                                 Mock(side_effect=AssertionError), Mock(side_effect=AssertionError))
+                                 Mock(side_effect=AssertionError))
         self.assertEqual(result['status'], 'ok')
 
-    def test_local_no_model_still_allows_published_captions(self):
-        result = runner.dispatch(self.request({'mode': 'local'}), caption_ok,
-                                 Mock(side_effect=AssertionError), Mock(side_effect=AssertionError))
-        self.assertEqual(result['status'], 'ok')
+    def test_local_and_unknown_backends_rejected_before_caption_or_cloud(self):
+        for mode in ('local', 'invalid', '', None, 123, {}, []):
+            for extra in ({}, {'captionsOnly': True}, {'forceAsr': True}, {'operation': 'status'}):
+                with self.subTest(mode=mode, extra=extra):
+                    caption, cloud = Mock(), Mock()
+                    with self.assertRaises(runner.RunnerError) as caught:
+                        runner.dispatch(self.request({'mode': mode}, **extra), caption, cloud)
+                    self.assertEqual(caught.exception.code, 'unsupported_backend')
+                    self.assertIn('captions/cloud', str(caught.exception))
+                    caption.assert_not_called()
+                    cloud.assert_not_called()
+        self.assertFalse(self.out.exists())
 
     def test_request_cannot_turn_caption_settings_into_asr(self):
         with self.assertRaises(runner.RunnerError) as caught:
@@ -121,22 +127,12 @@ class RunnerTests(unittest.TestCase):
 
     def test_invalid_asr_values_do_not_block_existing_captions(self):
         for config in ({'mode': 'captions', 'asrTimeout': 0},
-                       {'mode': 'cloud', 'cloudMaxAudioMiB': 0, 'asrTimeout': -1},
-                       {'mode': 'local', 'stateDir': 'relative', 'localModel': 'invalid'}):
+                       {'mode': 'cloud', 'cloudMaxAudioMiB': 0, 'asrTimeout': -1}):
             with self.subTest(config=config):
                 out = self.root / ('result-' + config['mode'])
                 result = runner.dispatch(self.request(config, out=str(out)), caption_ok,
-                                         Mock(side_effect=AssertionError), Mock(side_effect=AssertionError))
+                                         Mock(side_effect=AssertionError))
                 self.assertEqual(result['status'], 'ok')
-
-    def test_local_asr_bad_paths_limits_fail_before_model_or_download(self):
-        for config in ({'mode': 'local', 'stateDir': 'relative'},
-                       {'mode': 'local', 'localModelDir': 'relative'},
-                       {'mode': 'local', 'asrTimeout': 0},
-                       {'mode': 'local', 'asrTimeout': 86401}):
-            with self.subTest(config=config), self.assertRaises(runner.RunnerError):
-                runner.local_extract(self.request(config), config, self.out, 'user_requested')
-        self.assertFalse(self.out.exists())
 
     def test_cloud_bad_limits_fail_before_key_file_or_download(self):
         config = {**self.cloud, 'cloudMaxAudioMiB': 0, 'cloudApiKeyFile': str(self.root / 'private-key')}
@@ -145,21 +141,20 @@ class RunnerTests(unittest.TestCase):
                                  Mock(side_effect=AssertionError), Mock(side_effect=AssertionError))
         self.assertFalse(self.out.exists())
 
-    def test_explicit_force_uses_only_configured_backend(self):
-        local = Mock(return_value={'status': 'local_test'})
-        cloud = Mock(side_effect=AssertionError)
+    def test_explicit_force_uses_only_configured_cloud_backend(self):
+        cloud = Mock(return_value={'status': 'cloud_fixture'})
         caption = Mock(side_effect=AssertionError)
-        result = runner.dispatch(self.request({'mode': 'local'}, forceAsr=True, reason='unreliable_captions'),
-                                 caption, local, cloud)
-        self.assertEqual(result['status'], 'local_test')
-        self.assertEqual(local.call_args.args[-1], 'unreliable_captions')
-        cloud.assert_not_called()
+        result = runner.dispatch(self.request(self.cloud, forceAsr=True, reason='unreliable_captions'),
+                                 caption, cloud)
+        self.assertEqual(result['status'], 'cloud_fixture')
+        self.assertEqual(cloud.call_args.args[-1], 'unreliable_captions')
+        caption.assert_not_called()
 
     def test_safe_absence_only_triggers_selected_fallback(self):
         for code in ('no_captions', 'language_unavailable'):
             with self.subTest(code=code):
                 cloud = Mock(return_value={'status': 'cloud_fixture'})
-                result = runner.dispatch(self.request(self.cloud), lambda *args: {'status': code}, Mock(), cloud)
+                result = runner.dispatch(self.request(self.cloud), lambda *args: {'status': code}, cloud)
                 self.assertEqual(result['status'], 'cloud_fixture')
                 self.assertEqual(cloud.call_args.args[-1], code)
 
@@ -167,11 +162,10 @@ class RunnerTests(unittest.TestCase):
         for code in ('network_error', 'rate_limited', 'login_required', 'platform_restricted',
                      'video_identity_mismatch', 'parse_error', 'incomplete_metadata', 'unsupported_subtitle_format'):
             with self.subTest(code=code):
-                local, cloud = Mock(), Mock()
-                result = runner.dispatch(self.request(self.cloud), lambda *args: {'status': code}, local, cloud)
+                cloud = Mock()
+                result = runner.dispatch(self.request(self.cloud), lambda *args: {'status': code}, cloud)
                 self.assertFalse(result['asr_attempted'])
                 self.assertEqual(result['status'], code)
-                local.assert_not_called()
                 cloud.assert_not_called()
 
     def test_failed_caption_output_not_overwritten_by_fallback(self):
@@ -180,7 +174,7 @@ class RunnerTests(unittest.TestCase):
             (self.out / 'original.vtt').write_text('preserve raw', encoding='utf-8')
             return {'status': 'no_captions'}
         cloud = Mock()
-        runner.dispatch(self.request(self.cloud), failed, Mock(), cloud)
+        runner.dispatch(self.request(self.cloud), failed, cloud)
         cloud.assert_not_called()
         self.assertTrue((self.out / 'original.vtt').is_file())
 
@@ -347,7 +341,12 @@ class RunnerTests(unittest.TestCase):
         self.assertLessEqual(seen['timeout'], 3600)
         argv = processes[0].argv
         self.assertEqual(argv[argv.index('-c:a') + 1], 'libmp3lame')
-        self.assertEqual(processes[0].kwargs['env'], {})
+        child_env = processes[0].kwargs['env']
+        self.assertEqual(set(child_env), {'TMP', 'TEMP', 'TMPDIR'})
+        self.assertEqual(len(set(child_env.values())), 1)
+        scratch = Path(child_env['TMP'])
+        self.assertEqual(scratch.parent.parent, self.out)
+        self.assertFalse(scratch.exists())
         metadata = json.loads((self.out / 'metadata.json').read_text(encoding='utf-8'))
         self.assertIn('audio_source: local_audio_transcoded', metadata['warnings'])
         self.assertIn('duration_from_platform', ' '.join(metadata['warnings']))
@@ -396,20 +395,23 @@ class RunnerTests(unittest.TestCase):
         output.detach()
         self.assertEqual(json.loads(data)['message'], '中文输出')
 
-    def test_local_status_shows_resolved_model_and_interpreter_without_touching_cloud(self):
-        class LocalOnlyConfig(dict):
-            def get(self, key, default=None):
-                if key.startswith('cloud'):
-                    raise AssertionError('cloud config must not be accessed')
-                return super().get(key, default)
-        config = LocalOnlyConfig(mode='local', stateDir=str(self.root), localModel='small')
-        import local_asr
-        with patch.object(local_asr, 'dependency_versions', return_value={}):
-            result = runner.status(config, 'local')
-        self.assertEqual(result['python_executable'], sys.executable)
-        self.assertEqual(result['backend']['resolved_model_dir'], str(self.root / 'models' / 'small'))
-        self.assertFalse(result['runtime_ready'])
-        self.assertFalse(result['network_used'])
+    def test_direct_status_rejects_local_before_config_or_dependency_access(self):
+        with patch.object(runner.importlib.metadata, 'version', side_effect=AssertionError('dependency scan')), \
+             self.assertRaises(runner.RunnerError) as caught:
+            runner.status({}, 'local')
+        self.assertEqual(caught.exception.code, 'unsupported_backend')
+
+    def test_json_bridge_explicitly_rejects_local_without_io(self):
+        incoming = SimpleNamespace(buffer=io.BytesIO(b'{"operation":"status","config":{"mode":"local"}}'))
+        output = io.StringIO()
+        with patch.object(sys, 'stdin', incoming), patch.object(sys, 'stdout', output), \
+             patch.object(Path, 'read_text', side_effect=AssertionError('no credentials')), \
+             patch.object(runner, 'cloud_extract', side_effect=AssertionError('no cloud')):
+            self.assertEqual(runner.main(), 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['status'], 'unsupported_backend')
+        self.assertIn('captions/cloud', result['message'])
+        self.assertFalse(result['success'])
 
     def test_status_caption_does_not_import_asr_backend(self):
         class ForbiddenConfig(dict):
@@ -491,18 +493,6 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 'invalid_session')
             self.assertNotIn('PRIVATE', str(caught.exception))
             backend.assert_not_called()
-
-    def test_local_extract_receives_backend_only_namespace_property(self):
-        import local_asr
-        secret = 'FAKE_PRIVATE_MEMORY_SESSION'
-        config = {'mode': 'local', 'biliSessdata': secret, 'stateDir': str(self.root)}
-        request = self.request(config, target='https://www.bilibili.com/video/BV17K411P7hC/?p=27')
-        with patch.object(local_asr, 'transcribe', return_value={'status': 'fixture'}) as transcribe:
-            runner.local_extract(request, config, self.out, 'user_requested')
-        args = transcribe.call_args.args[0]
-        self.assertEqual(args.bili_sessdata, secret)
-        self.assertIsNone(args.bili_cookie_file)
-        self.assertIsNone(args.cookies)
 
     def test_cloud_private_transport_stays_in_downloader_not_api_or_files(self):
         secret = 'FAKE_PRIVATE_MEMORY_SESSION'

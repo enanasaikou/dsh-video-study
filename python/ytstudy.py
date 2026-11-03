@@ -246,14 +246,20 @@ def write_bundle(outdir, meta, url, track, cues, cleaned, raw_path, preferences,
 
 
 @contextmanager
-def youtube_session(module, args, logger):
-    # We own the temporary directory; the user's cookie file is only copied.
-    with tempfile.TemporaryDirectory(prefix='ytstudy-') as temp:
+def youtube_session(module, args, logger, output_directory):
+    # Caption absence must not create the final output (cloud fallback relies on
+    # that). Own a unique sibling instead, never tempfile's system/cwd default.
+    parent = Path(output_directory).absolute().parent
+    parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.ytstudy-', dir=parent) as temp:
         cookie_copy = None
         if args.cookies:
             cookie_copy = Path(temp) / 'cookies.txt'
             cookie_copy.write_bytes(Path(args.cookies).read_bytes())
-        with module.YoutubeDL(ydl_options(args.proxy, cookie_copy, logger)) as session:
+        options = ydl_options(args.proxy, cookie_copy, logger)
+        options.update(paths={'home': temp, 'temp': temp},
+                       outtmpl=str(Path(temp) / '%(id)s.%(ext)s'))
+        with module.YoutubeDL(options) as session:
             yield session
 
 
@@ -271,8 +277,10 @@ def extract(args):
             raise StudyError('invalid_input', '代理须为无账号密码的 http(s) 或 socks5(h) 地址。')
     if args.cookies and not Path(args.cookies).is_file():
         raise StudyError('invalid_input', '显式指定的 Cookie 文件不存在。')
+    outdir = (Path(args.out) if args.out else Path('outputs') /
+              f'{vid}-{datetime.now().strftime("%Y%m%d-%H%M%S")}').absolute()
     logger = QuietLogger()
-    with youtube_session(yt_dlp, args, logger) as ydl:
+    with youtube_session(yt_dlp, args, logger, outdir) as ydl:
         try:
             meta = ydl.extract_info(url, download=False)
         except Exception as e:
@@ -308,7 +316,6 @@ def extract(args):
             print(f'提示：发生语言回退，使用 {track["language"]}（{track["kind"]}）。', file=sys.stderr)
         fmt = sorted(track['formats'], key=lambda f: f['ext'] != 'vtt')[0]
         # Only a new directory; never overwrite an earlier run.
-        outdir = Path(args.out) if args.out else Path('outputs') / f'{vid}-{datetime.now().strftime("%Y%m%d-%H%M%S")}'
         if outdir.exists():
             raise StudyError('output_exists', '输出目录已存在；请换一个新目录。')
         outdir.mkdir(parents=True)

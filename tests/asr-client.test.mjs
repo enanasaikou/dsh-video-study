@@ -1,19 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { buildClient } from '../client/build.mjs';
+import { readFile } from 'node:fs/promises';
+
+const source = await readFile(new URL('../client/asr.js', import.meta.url), 'utf8');
 
 const KEY = 'NEW-PRIVATE-KEY-NEVER-RENDER';
 const OLD_KEY = 'OLD-PRIVATE-KEY-NEVER-RETURN';
-const COMMAND = "& 'C:/Python/python.exe' '-B' 'C:/plugin/python/setup_environment.py' '--backend' 'local' '--state-dir' 'C:/state' '--model' 'small' '--allow-downloads'";
+const COMMAND = "& 'C:/Python/python.exe' '-B' 'C:/plugin/python/setup_environment.py' '--backend' 'cloud' '--state-dir' 'C:/state' '--allow-downloads'";
 const defaults = { mode: 'captions', defaultLanguage: 'auto', pythonPath: '', stateDir: '', outputDir: '', proxy: '',
-  localModel: 'small', localModelDir: '', localDevice: 'cpu', localComputeType: 'int8', cloudEndpoint: '', cloudModel: '',
+  cloudEndpoint: '', cloudModel: '',
   cloudProviderName: '', cloudProtocol: 'auto', cloudResponseFormat: 'verbose_json', cloudAppId: '', cloudRegion: '', cloudResourceId: '',
   cloudApiKeyFile: '', cloudUploadConsent: false, cloudMaxAudioMiB: 25, allowInsecureLoopback: false,
   downloadTimeout: 300, asrTimeout: 3600, maxDuration: 14400 };
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 async function fixture(options = {}) {
-  let module;
   let revision = 4, values = { ...defaults, ...options.values }, savedKey = options.savedKey || '';
   const calls = [], copied = [], effects = [], refs = [], rendered = [];
   const React = options.React || {
@@ -47,20 +48,18 @@ async function fixture(options = {}) {
       revision++;
       value = snapshot();
     } else if (action === 'status') value = { status: 'ok', result: { status: 'ok',
-      backend: { status: 'dependency_missing', missing_dependencies: ['faster-whisper', OLD_KEY], apiKey: OLD_KEY }, message: OLD_KEY } };
+      backend: { status: 'dependency_missing', missing_dependencies: ['yt-dlp', 'faster-whisper', OLD_KEY], apiKey: OLD_KEY }, message: OLD_KEY } };
     else if (action === 'setup') value = { status: 'ok', result: { status: 'setup_command_prepared', command: COMMAND, executed: false, apiKey: OLD_KEY } };
     else throw new Error('Unexpected request: no auth, provider or installation allowed');
     return { status: 200, ok: true, async json() { return value; } };
   };
-  const source = await buildClient({ write: false });
   const context = { window: { fetch, navigator: { clipboard: { async writeText(text) { copied.push(text); } } },
-    __DSH_DIRECTORY_PICKER__: options.desktopPicker,
-    __ModuleLoader__: { load(value) { module = value; } } }, URL, AbortController, TextEncoder, setTimeout, clearTimeout, Date };
-  vm.runInNewContext(source, context, { timeout: 3000 });
-  const exports = module.factory(name => { assert.equal(name, 'react'); return React; });
-  const asr = exports._testing.asr;
+    __DSH_DIRECTORY_PICKER__: options.desktopPicker }, React, URL, AbortController, TextEncoder, setTimeout, clearTimeout, Date };
+  // Test the owned source directly: never run the client bundler or write its output.
+  const settings = vm.runInNewContext(source + '\ncreateAsrSettings(React);', context, { timeout: 3000 });
+  const asr = settings._testing;
   const controller = asr.createController(options.controllerOptions);
-  return { controller, asr, calls, copied, effects, refs, rendered, exports,
+  return { controller, asr, calls, copied, effects, refs, rendered,
     getSavedKey: () => savedKey, snapshot };
 }
 function response(status, code, message = OLD_KEY, field) {
@@ -96,13 +95,13 @@ test('initial config GET is same-origin only and does not start QR, ASR, status 
   controller.dispose();
 });
 
-test('unloaded mode select uses a disabled empty placeholder and retains all three actual options', async () => {
+test('unloaded mode select uses a disabled empty placeholder and retains only captions/cloud options', async () => {
   for (const loading of [true, false]) {
     const f = await renderMode('captions', { loading, values: null, error: loading ? '' : '设置服务返回格式无效，未确认完成。' });
     const nodes = treeNodes(f.tree), mode = nodes.find(node => node.type === 'select');
     assert.equal(mode.props.value, ''); assert.equal(mode.props.disabled, true);
     const options = treeNodes(mode).filter(node => node.type === 'option');
-    assert.deepEqual(options.map(node => node.props.value), ['', 'captions', 'cloud', 'local']);
+    assert.deepEqual(options.map(node => node.props.value), ['', 'captions', 'cloud']);
     assert.equal(options[0].props.disabled, true);
     assert.equal(options[0].children[0], loading ? '读取设置中…' : '设置未载入');
     assert.equal(JSON.stringify(f.tree).includes('不识别音频'), false);
@@ -133,17 +132,17 @@ test('pending GET shows loading placeholder, then a successful snapshot enables 
   assert.equal(f.controller.snapshot().values, null);
   const waiting = await renderMode('captions', { ...f.controller.snapshot() });
   assert.equal(treeNodes(waiting.tree).find(node => node.type === 'select').props.value, '');
-  assert.equal(f.controller.update('mode', 'local'), false); assert.equal(await f.controller.save(), false);
+  assert.equal(f.controller.update('mode', 'cloud'), false); assert.equal(await f.controller.save(), false);
   finish(); assert.equal(await pending, true);
   const ready = await renderMode('cloud', { ...f.controller.snapshot() });
   const mode = treeNodes(ready.tree).find(node => node.type === 'select');
   assert.equal(mode.props.value, 'cloud'); assert.equal(mode.props.disabled, false);
-  assert.deepEqual(treeNodes(mode).filter(node => node.type === 'option').map(node => node.props.value), ['captions', 'cloud', 'local']);
+  assert.deepEqual(treeNodes(mode).filter(node => node.type === 'option').map(node => node.props.value), ['captions', 'cloud']);
   f.controller.dispose();
 });
 
 test('each loaded server mode remains selectable and persists through POST save only with CAS', async () => {
-  for (const [initial, next] of [['captions', 'cloud'], ['cloud', 'local'], ['local', 'captions']]) {
+  for (const [initial, next] of [['captions', 'cloud'], ['cloud', 'captions']]) {
     const f = await fixture({ values: { mode: initial } }); await f.controller.load();
     const ready = await renderMode(initial, { ...f.controller.snapshot() });
     const mode = treeNodes(ready.tree).find(node => node.type === 'select');
@@ -157,9 +156,36 @@ test('each loaded server mode remains selectable and persists through POST save 
   }
 });
 
+test('local/unknown modes and obsolete local ASR fields cannot enter the cloud edition draft or requests', async () => {
+  const f = await fixture({ values: { localModel: 'small', localModelDir: '/legacy/model', localDevice: 'cuda', localComputeType: 'float16' } });
+  await f.controller.load();
+  assert.equal(f.controller.update('mode', 'local'), false); assert.equal(f.controller.update('mode', 'unknown'), false);
+  for (const field of ['localModel', 'localModelDir', 'localDevice', 'localComputeType']) {
+    assert.equal(field in f.asr.defaults, false); assert.equal(field in f.controller.snapshot().draft, false);
+    assert.equal(f.controller.update(field, 'legacy-value'), false);
+  }
+  assert.equal(await f.controller.pickPath('localModelDir'), false);
+  assert.equal(f.calls.length, 1); assert.equal(f.controller.snapshot().dirty, false); f.controller.dispose();
+  for (const mode of ['local', 'unknown']) {
+    const invalid = await fixture({ values: { mode } });
+    assert.equal(await invalid.controller.load(), false); assert.equal(invalid.controller.snapshot().values, null);
+    assert.equal(await invalid.controller.setup(), false); assert.equal(invalid.calls.length, 1); invalid.controller.dispose();
+  }
+});
+
+test('setup in captions/cloud posts an empty request without local backend or model parameters', async () => {
+  for (const mode of ['captions', 'cloud']) {
+    const f = await fixture({ values: { mode } }); await f.controller.load();
+    assert.equal(await f.controller.setup(), true);
+    assert.equal(f.calls[1].action, 'setup'); assert.deepEqual(f.calls[1].body, {});
+    assert.equal(f.controller.snapshot().command, COMMAND);
+    assert.equal(/--model|'local'/.test(COMMAND), false); f.controller.dispose();
+  }
+});
+
 test('failed explicit reload does not reuse a previous snapshot to unlock settings actions', async () => {
   let unavailable = false;
-  const f = await fixture({ values: { mode: 'local' }, reply: async action => action === 'config' && unavailable
+  const f = await fixture({ values: { mode: 'cloud' }, reply: async action => action === 'config' && unavailable
     ? response(503, 'settings_unavailable') : undefined });
   await f.controller.load(); unavailable = true;
   assert.equal(await f.controller.load(), false); assert.equal(f.controller.snapshot().values, null);
@@ -219,14 +245,14 @@ test('empty new Key means keep; only explicit set/clear changes the stored secre
 
 test('switching away from cloud drops only the unsaved secret, never implicitly clears the saved one', async () => {
   const f = await fixture({ values: { mode: 'cloud' }, savedKey: OLD_KEY });
-  await f.controller.load(); f.controller.setSecret(KEY); f.controller.update('mode', 'local'); await f.controller.save();
+  await f.controller.load(); f.controller.setSecret(KEY); f.controller.update('mode', 'captions'); await f.controller.save();
   assert.equal(f.calls[1].body.secret.action, 'keep'); assert.equal(f.getSavedKey(), OLD_KEY);
   assert.equal(f.controller.snapshot().secretDraftPresent, false);
   f.controller.dispose();
 });
 
 test('unsaved edits block environment/setup calls until a successful save', async () => {
-  const f = await fixture(); await f.controller.load(); f.controller.update('mode', 'local');
+  const f = await fixture(); await f.controller.load(); f.controller.update('mode', 'cloud');
   assert.equal(await f.controller.check(), false); assert.equal(await f.controller.setup(), false);
   assert.equal(f.calls.length, 1); assert.equal(f.controller.snapshot().error, '请先保存设置。');
   await f.controller.save(); await f.controller.check(); await f.controller.setup();
@@ -239,9 +265,9 @@ test('unsaved edits block environment/setup calls until a successful save', asyn
 });
 
 test('status presents only safe offline summary and approved dependency names', async () => {
-  const f = await fixture({ values: { mode: 'local' } }); await f.controller.load(); await f.controller.check();
+  const f = await fixture({ values: { mode: 'cloud' } }); await f.controller.load(); await f.controller.check();
   assert.equal(f.controller.snapshot().result.label, '缺少依赖');
-  assert.deepEqual(Array.from(f.controller.snapshot().result.missing), ['faster-whisper']);
+  assert.deepEqual(Array.from(f.controller.snapshot().result.missing), ['yt-dlp']);
   assert.equal(JSON.stringify(f.controller.snapshot()).includes(OLD_KEY), false);
   assert.equal(f.calls.length, 2); f.controller.dispose();
 });
@@ -250,7 +276,7 @@ test('CAS409 forces explicit reload rather than silently retrying or merging sta
   let conflict = true;
   const f = await fixture({ reply: async (action, method) => action === 'save' && method === 'POST' && conflict
     ? response(409, 'settings_conflict') : undefined });
-  await f.controller.load(); f.controller.update('mode', 'local'); f.controller.setSecret(KEY);
+  await f.controller.load(); f.controller.update('mode', 'cloud'); f.controller.setSecret(KEY);
   assert.equal(await f.controller.save(), false);
   assert.equal(f.controller.snapshot().conflict, true); assert.match(f.controller.snapshot().error, /重新载入/);
   assert.equal(f.controller.update('mode', 'cloud'), false);
@@ -310,31 +336,26 @@ test('model input has no maxLength and preserves punctuation and long unicode na
   const rendered = await renderMode('cloud');
   for (const node of treeNodes(rendered.tree).filter(node => node.type === 'input')) assert.equal(node.props.maxLength, undefined);
   const visible = JSON.stringify(rendered.tree);
-  assert.match(visible, /服务名称（自定义）/); assert.match(visible, /48小时/); assert.match(visible, /可能继续并计费/);
-  for (const name of ['硅基流动', '阿里 Qwen-ASR', '腾讯云', '火山', 'Groq', '接口协议', '服务默认']) assert.match(visible, new RegExp(name));
+  for (const name of ['服务名称（自定义）', '接口协议', 'API地址', '模型 / 引擎参数', '服务默认']) assert.match(visible, new RegExp(name));
   f.controller.dispose();
 });
 
-test('presets are draft-only editable suggestions, keep the saved key, and never choose a provider by name', async () => {
-  const f = await fixture({ values: { mode: 'cloud', cloudUploadConsent: true, cloudApiKeyFile: 'C:/old.key' }, savedKey: OLD_KEY });
-  await f.controller.load(); f.controller.setSecret(KEY);
-  assert.equal(f.controller.applyPreset('siliconflow'), true);
-  let state = f.controller.snapshot(); assert.equal(f.calls.length, 1);
-  assert.equal(state.draft.cloudProtocol, 'openai'); assert.equal(state.draft.cloudResponseFormat, 'provider_default');
-  assert.equal(state.secretAction, 'keep'); assert.equal(state.secretDraftPresent, false);
-  assert.equal(state.draft.cloudUploadConsent, false);
-  f.controller.update('cloudProviderName', '我的代理，不是硅基'); f.controller.update('cloudEndpoint', 'https://gateway.example.test/any/path');
+test('manual cloud fields remain editable without any preset selector, data or apply API', async () => {
+  const f = await fixture({ values: { mode: 'cloud' }, savedKey: OLD_KEY });
+  await f.controller.load();
+  assert.equal(f.controller.applyPreset, undefined);
+  assert.equal(/\bpresets\b|applyPreset|siliconflow|qwenFiletrans|api\.groq\.com|SenseVoiceSmall/.test(source), false);
+  f.controller.update('cloudProviderName', '我的自定义服务');
+  f.controller.update('cloudProtocol', 'openai');
+  f.controller.update('cloudEndpoint', 'https://gateway.example.test/any/path');
   f.controller.update('cloudModel', '未来的自定义模型');
-  assert.equal(f.controller.snapshot().draft.cloudProtocol, 'openai');
-  assert.equal(await f.controller.save(), true); assert.equal(f.calls[1].body.secret.action, 'keep');
-  assert.equal(f.getSavedKey(), OLD_KEY);
-  assert.equal(f.calls[1].body.patch.cloudModel, '未来的自定义模型');
-  assert.equal(JSON.stringify(f.controller.snapshot()).includes(KEY), false);
-  for (const [id, protocol] of [['paraformer', 'dashscope_paraformer'], ['qwen', 'dashscope_qwen'], ['tencent', 'tencent_rec_task'], ['volcengine', 'volcengine_flash']]) {
-    assert.equal(f.controller.applyPreset(id), true); assert.equal(f.controller.snapshot().draft.cloudProtocol, protocol);
-    assert.equal(f.controller.snapshot().draft.cloudUploadConsent, false);
-  }
-  assert.equal(f.controller.applyPreset('__proto__'), false); f.controller.dispose();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.controller.snapshot().draft.cloudUploadConsent, false);
+  assert.equal(await f.controller.save(), true);
+  assert.equal(f.calls[1].body.secret.action, 'keep'); assert.equal(f.getSavedKey(), OLD_KEY);
+  assert.deepEqual(f.calls[1].body.patch, { cloudProviderName: '我的自定义服务', cloudProtocol: 'openai',
+    cloudEndpoint: 'https://gateway.example.test/any/path', cloudModel: '未来的自定义模型' });
+  f.controller.dispose();
 });
 
 test('editing destination identifiers keeps the saved key, drops only the unsaved draft, and revokes consent', async () => {
@@ -385,7 +406,7 @@ test('invalid revision snapshots fail closed and host authentication errors requ
   }
 });
 
-test('captions, cloud and local render only their relevant basic fields; advanced remains collapsed', async () => {
+test('captions and cloud render only their relevant basic fields; advanced remains collapsed', async () => {
   const captions = await renderMode('captions');
   const captionsText = JSON.stringify(captions.tree);
   assert.match(captionsText, /仅现有字幕/); assert.match(captionsText, /不识别音频/);
@@ -396,33 +417,59 @@ test('captions, cloud and local render only their relevant basic fields; advance
   assert.equal(password.props.placeholder, '已配置，留空保留');
   assert.equal(JSON.stringify(cloud.tree).includes(OLD_KEY), false);
   assert.match(JSON.stringify(cloud.tree), /允许上传音频到此服务/);
-  const local = await renderMode('local'); const localText = JSON.stringify(local.tree);
-  for (const label of ['模型目录', 'CPU', 'CUDA', '计算类型', 'Python路径']) assert.equal(localText.includes(label), true);
-  assert.equal(localText.includes('API地址'), false);
-  for (const f of [captions, cloud, local]) {
+  for (const f of [captions, cloud]) {
+    const text = JSON.stringify(f.tree);
+    const mode = treeNodes(f.tree).find(node => node.type === 'select');
+    assert.deepEqual(treeNodes(mode).filter(node => node.type === 'option').map(node => node.props.value), ['captions', 'cloud']);
+    for (const removed of ['快捷填入（可选，不会自动保存）', '选择预设或自定义', '服务名称、完整URL和模型均可自定义',
+      '服务只返回正文时', '切换目标/协议/凭据标识', '本机ASR', '模型目录', 'CPU', 'CUDA', '计算类型', '选择模型文件夹', '恢复默认模型目录'])
+      assert.equal(text.includes(removed), false, removed);
+    for (const retained of ['Python路径', '选择Python文件夹', '恢复默认Python', '状态目录', '输出目录', '代理'])
+      assert.ok(text.includes(retained), retained);
     const details = treeNodes(f.tree).find(node => node.type === 'details');
     assert.ok(details); assert.equal(details.props?.open, undefined);
   }
 });
 
+test('every manual cloud protocol retains its credential inputs without presets or the removed explanation blocks', async () => {
+  for (const protocol of ['auto', 'openai', 'dashscope_paraformer', 'dashscope_qwen', 'volcengine_flash', 'tencent_rec_task']) {
+    const values = { ...defaults, mode: 'cloud', cloudProtocol: protocol };
+    const f = await renderMode('cloud', { draft: values, values });
+    const nodes = treeNodes(f.tree), text = JSON.stringify(f.tree);
+    const selects = nodes.filter(node => node.type === 'select');
+    assert.equal(selects.length, protocol === 'auto' || protocol === 'openai' ? 4 : 3);
+    for (const label of ['服务名称（自定义）', '接口协议', 'API地址', '模型 / 引擎参数', 'Key文件（可选）', '允许上传音频到此服务'])
+      assert.ok(text.includes(label), label);
+    assert.ok(nodes.some(node => node.type === 'input' && node.props.type === 'password'));
+    if (protocol === 'volcengine_flash') for (const label of ['App ID（应用标识）', 'Access Token', '语音资源ID']) assert.ok(text.includes(label), label);
+    if (protocol === 'tencent_rec_task') for (const label of ['SecretId（凭据标识）', 'SecretKey', '地域（可选）']) assert.ok(text.includes(label), label);
+    for (const removed of ['快捷填入', '选择预设', '服务名称、完整URL和模型均可自定义', '服务只返回正文', '切换目标/协议/凭据标识']) {
+      assert.equal(text.includes(removed), false, removed); assert.equal(source.includes(removed), false, removed);
+    }
+    assert.deepEqual(f.calls, []);
+  }
+});
+
 test('dirty form disables environment/setup UI buttons but preserves save and reload', async () => {
-  const f = await renderMode('local', { dirty: true });
+  const f = await renderMode('cloud', { dirty: true });
   const buttons = treeNodes(f.tree).filter(node => node.type === 'button');
   const named = name => buttons.find(node => node.children[0] === name);
   assert.equal(named('检查环境').props.disabled, true); assert.equal(named('生成部署命令').props.disabled, true);
+  assert.equal(named('一键准备运行环境').props.disabled, true);
   assert.equal(named('保存设置').props.disabled, false);
 });
 
 function ok(value) { return { status: 200, ok: true, async json() { return value; } }; }
 
 test('picker posts only allowed field, fills draft only, and preserves unrelated draft, Key and upload authorization', async () => {
-  const paths = { pythonPath: 'C:\\Python 3\\python.exe', localModelDir: 'D:\\模型\\small' };
+  const paths = { pythonPath: 'C:\\Python 3\\python.exe' };
   const f = await fixture({ values: { mode: 'cloud', cloudUploadConsent: true }, savedKey: OLD_KEY,
     reply: async (action, method, body) => action === 'pick-path' ? ok({ status: 'ok', cancelled: false, path: paths[body.field], message: OLD_KEY }) : undefined });
   await f.controller.load(); f.controller.update('cloudModel', 'unsaved-model'); f.controller.setSecret(KEY);
   assert.equal(await f.controller.pickPath('cloudApiKeyFile'), false);
   assert.equal(await f.controller.pickPath('__proto__'), false);
-  for (const field of ['pythonPath', 'localModelDir']) {
+  assert.equal(await f.controller.pickPath('localModelDir'), false);
+  for (const field of ['pythonPath']) {
     assert.equal(await f.controller.pickPath(field), true);
     const call = f.calls.at(-1);
     assert.equal(call.url, 'api/video-study/asr/pick-path'); assert.equal(call.request.method, 'POST');
@@ -441,9 +488,9 @@ test('picker posts only allowed field, fills draft only, and preserves unrelated
 });
 
 test('picker cancellation ignores any returned path and retains exact draft without save or setup', async () => {
-  const f = await fixture({ values: { mode: 'local', pythonPath: 'C:/old/python.exe' },
+  const f = await fixture({ values: { mode: 'cloud', pythonPath: 'C:/old/python.exe' },
     reply: async action => action === 'pick-path' ? ok({ status: 'ok', cancelled: true, path: 'C:/unwanted/python.exe', message: OLD_KEY }) : undefined });
-  await f.controller.load(); f.controller.update('localModelDir', 'D:/unsaved');
+  await f.controller.load(); f.controller.update('pythonPath', 'D:/unsaved/python.exe');
   const before = JSON.stringify(f.controller.snapshot().draft);
   assert.equal(await f.controller.pickPath('pythonPath'), false);
   assert.equal(JSON.stringify(f.controller.snapshot().draft), before); assert.equal(f.controller.snapshot().busy, false);
@@ -453,20 +500,20 @@ test('picker cancellation ignores any returned path and retains exact draft with
 
 test('open picker locks edits and other actions, and conflicts never reopen a picker or overwrite draft', async () => {
   let finish;
-  const f = await fixture({ values: { mode: 'local' }, reply: async action => action === 'pick-path'
-    ? new Promise(resolve => { finish = () => resolve(ok({ status: 'ok', cancelled: false, path: 'D:/selected-model' })); }) : undefined });
-  await f.controller.load(); f.controller.update('localModelDir', 'D:/unsaved');
-  const pending = f.controller.pickPath('localModelDir'); await flush();
+  const f = await fixture({ values: { mode: 'cloud' }, reply: async action => action === 'pick-path'
+    ? new Promise(resolve => { finish = () => resolve(ok({ status: 'ok', cancelled: false, path: 'D:/selected/python.exe' })); }) : undefined });
+  await f.controller.load(); f.controller.update('pythonPath', 'D:/unsaved/python.exe');
+  const pending = f.controller.pickPath('pythonPath'); await flush();
   assert.equal(f.controller.snapshot().busy, true);
   assert.equal(f.controller.update('pythonPath', 'C:/ignored.exe'), false);
   assert.equal(await f.controller.pickPath('pythonPath'), false); assert.equal(await f.controller.save(), false);
   assert.equal(await f.controller.setup(), false); assert.equal(await f.controller.check(), false); assert.equal(await f.controller.load(), false);
   assert.equal(f.calls.length, 2); finish(); assert.equal(await pending, true);
-  assert.equal(f.controller.snapshot().draft.localModelDir, 'D:/selected-model'); f.controller.dispose();
+  assert.equal(f.controller.snapshot().draft.pythonPath, 'D:/selected/python.exe'); f.controller.dispose();
   const stale = await fixture({ reply: async action => action === 'save' ? response(409, 'settings_conflict') : undefined });
-  await stale.controller.load(); stale.controller.update('localModelDir', 'D:/keep-draft'); await stale.controller.save();
-  assert.equal(await stale.controller.pickPath('localModelDir'), false);
-  assert.equal(stale.controller.snapshot().draft.localModelDir, 'D:/keep-draft'); assert.equal(stale.calls.length, 2); stale.controller.dispose();
+  await stale.controller.load(); stale.controller.update('pythonPath', 'D:/keep-draft/python.exe'); await stale.controller.save();
+  assert.equal(await stale.controller.pickPath('pythonPath'), false);
+  assert.equal(stale.controller.snapshot().draft.pythonPath, 'D:/keep-draft/python.exe'); assert.equal(stale.calls.length, 2); stale.controller.dispose();
 });
 
 test('picker rejects malformed, relative, URL and browser fakepath responses without rendering raw server text', async () => {
@@ -516,31 +563,24 @@ test('120s picker timeout rejects even late success, while disposal aborts and n
   }
 });
 
-test('optional localDefaults metadata is display-only, uses draft root/model, and missing metadata uses honest placeholders', async () => {
-  for (const [metadata, root, modelPath, pythonPath] of [
-    [{ stateDir: 'C:\\状态', platform: 'win32' }, '', 'C:\\状态\\models\\medium', 'C:\\状态\\venv\\Scripts\\python.exe'],
-    [{ stateDir: '/server/state', platform: 'linux' }, '', '/server/state/models/medium', '/server/state/venv/bin/python'],
-    [{ stateDir: '/server/state', platform: 'darwin' }, '/custom/state', '/custom/state/models/medium', '/custom/state/venv/bin/python'],
-    [undefined, '', '<状态目录>/models/medium', '<状态目录>/venv/Scripts/python.exe'],
-    [{ stateDir: 'BAD-RAW-DEFAULT', platform: 'unknown' }, '', '<状态目录>/models/medium', '<状态目录>/venv/Scripts/python.exe']
-  ]) {
-    const f = await fixture({ values: { mode: 'local' }, localDefaults: metadata }); await f.controller.load();
-    if (root) f.controller.update('stateDir', root);
-    f.controller.update('localModel', 'medium');
-    const rendered = await renderMode('local', { ...f.controller.snapshot() });
-    const text = treeNodes(rendered.tree).flatMap(node => node.children || []).filter(value => typeof value === 'string').join(' ');
-    assert.ok(text.includes(modelPath), modelPath);
-    assert.equal(text.includes(pythonPath), false, 'Do not restore the removed long Python deployment hint');
+test('optional environment metadata never introduces model defaults or leaks into the saved patch', async () => {
+  for (const metadata of [{ stateDir: 'C:\\状态', platform: 'win32' }, { stateDir: '/server/state', platform: 'linux' },
+    { stateDir: '/server/state', platform: 'darwin' }, undefined, { stateDir: 'BAD-RAW-DEFAULT', platform: 'unknown' }]) {
+    const f = await fixture({ values: { mode: 'cloud' }, localDefaults: metadata }); await f.controller.load();
+    f.controller.update('stateDir', '/custom/state');
+    const rendered = await renderMode('cloud', { ...f.controller.snapshot() });
+    const text = JSON.stringify(rendered.tree);
     assert.match(text, /选择Python安装或venv文件夹；留空自动查找/);
-    assert.equal(text.includes('BAD-RAW-DEFAULT'), false); assert.equal(f.calls.length, 1);
+    for (const removed of ['BAD-RAW-DEFAULT', '/models/', '模型目录']) assert.equal(text.includes(removed), false);
+    assert.equal(f.calls.length, 1);
     assert.equal('localDefaults' in f.controller.snapshot().draft, false); await f.controller.save();
-    assert.equal('localDefaults' in f.calls.at(-1).body.patch, false); f.controller.dispose();
+    assert.deepEqual(f.calls.at(-1).body.patch, { stateDir: '/custom/state' }); f.controller.dispose();
   }
 });
 
-test('local settings keep short field hints and remove the unwanted deployment essay and six-step list', async () => {
-  const f = await renderMode('local'); const nodes = treeNodes(f.tree); const text = JSON.stringify(f.tree);
-  for (const phrase of ['选择Python文件夹…', '选择模型文件夹…', '选择Python安装或venv文件夹；留空自动查找', '留空使用：'])
+test('environment settings keep only short Python hints and no model deployment guide', async () => {
+  const f = await renderMode('cloud'); const nodes = treeNodes(f.tree); const text = JSON.stringify(f.tree);
+  for (const phrase of ['选择Python文件夹…', '选择Python安装或venv文件夹；留空自动查找'])
     assert.ok(text.includes(phrase), phrase);
   for (const phrase of ['初次部署推荐', '服务端本机路径', '不会安装到显式Python路径或模型目录', '不保证CUDA', 'forceAsr:true'])
     assert.equal(text.includes(phrase), false, phrase);
@@ -548,53 +588,50 @@ test('local settings keep short field hints and remove the unwanted deployment e
   assert.equal(nodes.some(node => node.type === 'ol'), false);
   assert.deepEqual(f.calls, []);
   for (const state of [{ busy: true }, { conflict: true }, { loading: true }, { values: null }]) {
-    const locked = await renderMode('local', state);
+    const locked = await renderMode('cloud', state);
     for (const node of treeNodes(locked.tree).filter(node => node.type === 'button' && /选择.*文件夹|恢复默认/.test(node.children[0])))
       assert.equal(node.props.disabled, true);
   }
 });
 
-test('fake React picker/reset buttons change controller draft only, while compute selects keep custom choices on device change', async () => {
-  const f = await fixture({ values: { mode: 'local', localComputeType: 'custom-compute', localModelDir: '/old/model' },
-    reply: async action => action === 'pick-path' ? ok({ status: 'ok', cancelled: false, path: '/chosen/bin/python' }) : undefined });
-  await f.controller.load(); const rendered = await renderMode('local', { ...f.controller.snapshot() }); rendered.componentRef.current = f.controller;
-  const nodes = treeNodes(rendered.tree), named = name => nodes.find(node => node.type === 'button' && node.children[0] === name);
-  named('选择Python文件夹…').props.onClick(); await flush();
-  assert.equal(f.controller.snapshot().draft.pythonPath, '/chosen/bin/python');
-  named('恢复默认Python').props.onClick(); named('恢复默认模型目录').props.onClick();
-  assert.equal(f.controller.snapshot().draft.pythonPath, ''); assert.equal(f.controller.snapshot().draft.localModelDir, '');
-  assert.deepEqual(f.calls.map(call => call.action), ['config', 'pick-path']);
-  const compute = nodes.find(node => node.type === 'select' && node.props.value === 'custom-compute');
-  assert.ok(compute); assert.ok(treeNodes(compute).some(node => node.type === 'option' && node.props.value === 'custom-compute'));
-  assert.ok(treeNodes(compute).some(node => node.type === 'option' && node.props.value === 'int8'));
-  assert.ok(treeNodes(compute).some(node => node.type === 'option' && node.props.value === 'float16'));
-  const device = nodes.find(node => node.type === 'select' && node.props.value === 'cpu');
-  device.props.onChange({ currentTarget: { value: 'cuda' } });
-  assert.equal(f.controller.snapshot().draft.localDevice, 'cuda'); assert.equal(f.controller.snapshot().draft.localComputeType, 'custom-compute');
-  compute.props.onChange({ currentTarget: { value: 'float16' } }); assert.equal(f.controller.snapshot().draft.localComputeType, 'float16');
-  assert.equal(f.calls.length, 2); f.controller.dispose();
+test('Python picker/reset buttons change only the environment draft in both supported modes', async () => {
+  for (const mode of ['captions', 'cloud']) {
+    const f = await fixture({ values: { mode },
+      reply: async action => action === 'pick-path' ? ok({ status: 'ok', cancelled: false, path: '/chosen/bin/python' }) : undefined });
+    await f.controller.load(); const rendered = await renderMode(mode, { ...f.controller.snapshot() }); rendered.componentRef.current = f.controller;
+    const nodes = treeNodes(rendered.tree), named = name => nodes.find(node => node.type === 'button' && node.children[0] === name);
+    named('选择Python文件夹…').props.onClick(); await flush();
+    assert.equal(f.controller.snapshot().draft.pythonPath, '/chosen/bin/python');
+    named('恢复默认Python').props.onClick();
+    assert.equal(f.controller.snapshot().draft.pythonPath, '');
+    assert.deepEqual(f.calls.map(call => call.action), ['config', 'pick-path']);
+    assert.equal(nodes.some(node => node.type === 'option' && ['cpu', 'cuda', 'int8', 'float16'].includes(node.props.value)), false);
+    f.controller.dispose();
+  }
 });
 
 test('offline status displays only known absolute resolved paths and safe next steps, never unknown diagnostics', async () => {
   for (const bad of [false, true]) {
-    const f = await fixture({ values: { mode: 'local' }, reply: async action => action === 'status' ? ok({ status: 'ok', result: {
+    const f = await fixture({ values: { mode: 'cloud' }, reply: async action => action === 'status' ? ok({ status: 'ok', result: {
       python_executable: bad ? 'https://secret.test/' + OLD_KEY : '/state/venv/bin/python', message: OLD_KEY,
-      backend: { status: 'model_missing', resolved_model_dir: bad ? 'C:/bad\n' + OLD_KEY : '/state/models/small', unknown: OLD_KEY }
+      backend: { status: 'dependency_missing', resolved_model_dir: bad ? 'C:/bad\n' + OLD_KEY : '/state/models/small', unknown: OLD_KEY }
     } }) : undefined });
     await f.controller.load(); await f.controller.check();
     const result = f.controller.snapshot().result;
-    assert.equal(result.python, bad ? '' : '/state/venv/bin/python'); assert.equal(result.modelDir, bad ? '' : '/state/models/small');
-    assert.match(result.next, /恢复默认.*保存/); assert.match(result.next, /留空不会自动下载/);
-    const rendered = await renderMode('local', { ...f.controller.snapshot() });
+    assert.equal(result.python, bad ? '' : '/state/venv/bin/python'); assert.equal('modelDir' in result, false);
+    assert.match(result.next, /一键准备运行环境/);
+    assert.equal(/生成部署命令|模型|faster-whisper|CUDA/.test(JSON.stringify(result)), false);
+    const rendered = await renderMode('cloud', { ...f.controller.snapshot() });
     assert.equal(JSON.stringify(rendered.tree).includes(OLD_KEY), false);
-    if (!bad) { assert.match(JSON.stringify(rendered.tree), /检查使用的Python/); assert.match(JSON.stringify(rendered.tree), /检查解析的模型目录/); }
+    if (!bad) assert.match(JSON.stringify(rendered.tree), /找到 Python/);
+    assert.equal(JSON.stringify(rendered.tree).includes('检查解析的模型目录'), false);
     f.controller.dispose();
   }
 });
 
 test('desktop picker is invoked synchronously from the click and only resolves the chosen directory on the backend', async () => {
   let invoked = 0, finish;
-  const f = await fixture({ values: { mode: 'local' }, desktopPicker: { pick(...args) {
+  const f = await fixture({ values: { mode: 'cloud' }, desktopPicker: { pick(...args) {
     assert.equal(args.length, 0); invoked++; return new Promise(resolve => { finish = resolve; });
   } }, reply: async (action, method, body) => {
     if (action !== 'resolve-path') return;
@@ -613,7 +650,7 @@ test('desktop picker is invoked synchronously from the click and only resolves t
 
 test('desktop cancellation, invalid paths and IPC failures never fall back to a second dialog or leak errors', async () => {
   for (const selected of [null, 'relative', 'C:/bad\npath', undefined, 'throws']) {
-    const f = await fixture({ values: { mode: 'local', pythonPath: 'C:/keep/python.exe' }, desktopPicker: { async pick() {
+    const f = await fixture({ values: { mode: 'cloud', pythonPath: 'C:/keep/python.exe' }, desktopPicker: { async pick() {
       if (selected === 'throws') throw new Error(OLD_KEY); return selected;
     } } });
     await f.controller.load(); assert.equal(await f.controller.pickPath('pythonPath'), false);
@@ -628,34 +665,88 @@ test('desktop cancellation, invalid paths and IPC failures never fall back to a 
 
 test('cancel immediately releases UI wait but keeps the native dialog gate until late result settles without applying it', async () => {
   let finish, invoked = 0;
-  const f = await fixture({ values: { mode: 'local', localModelDir: '/keep/model' }, desktopPicker: { pick() {
+  const f = await fixture({ values: { mode: 'cloud', pythonPath: '/keep/python' }, desktopPicker: { pick() {
     invoked++; return new Promise(resolve => { finish = resolve; });
   } } });
-  await f.controller.load(); const pending = f.controller.pickPath('localModelDir');
+  await f.controller.load(); const pending = f.controller.pickPath('pythonPath');
   assert.equal(f.controller.cancelPick(), true); assert.equal(await pending, false);
   assert.equal(f.controller.snapshot().busy, false); assert.equal(f.controller.snapshot().picking, '');
   assert.match(f.controller.snapshot().notice, /取消/);
-  assert.equal(await f.controller.pickPath('localModelDir'), false); assert.equal(invoked, 1);
+  assert.equal(await f.controller.pickPath('pythonPath'), false); assert.equal(invoked, 1);
   assert.match(f.controller.snapshot().error, /完成或取消/);
-  finish('/late/model'); await flush();
-  assert.equal(f.controller.snapshot().draft.localModelDir, '/keep/model');
+  finish('/late/python'); await flush();
+  assert.equal(f.controller.snapshot().draft.pythonPath, '/keep/python');
   assert.deepEqual(f.calls.map(call => call.action), ['config']); f.controller.dispose();
 });
 
 test('picker timeout releases UI even if the desktop IPC never settles and shows the error by its field', async () => {
   const timers = [];
-  const f = await fixture({ values: { mode: 'local' }, desktopPicker: { pick: () => new Promise(() => {}) },
+  const f = await fixture({ values: { mode: 'cloud' }, desktopPicker: { pick: () => new Promise(() => {}) },
     controllerOptions: { setTimeout(fn, delay) { const timer = { fn, delay }; timers.push(timer); return timer; }, clearTimeout() {} } });
   await f.controller.load(); const pending = f.controller.pickPath('pythonPath');
-  const active = await renderMode('local', { ...f.controller.snapshot() }); active.componentRef.current = f.controller;
+  const active = await renderMode('cloud', { ...f.controller.snapshot() }); active.componentRef.current = f.controller;
   const nodes = treeNodes(active.tree);
   assert.ok(nodes.some(node => node.type === 'button' && node.children[0] === '正在打开…'));
   assert.equal(nodes.find(node => node.type === 'button' && node.children[0] === '取消选择').props.disabled, false);
   assert.ok(nodes.some(node => node.props?.role === 'status' && JSON.stringify(node).includes('正在打开')));
   timers.at(-1).fn(); assert.equal(await pending, false); assert.equal(f.controller.snapshot().busy, false);
-  const failed = await renderMode('local', { ...f.controller.snapshot() });
+  const failed = await renderMode('cloud', { ...f.controller.snapshot() });
   assert.ok(treeNodes(failed.tree).some(node => node.props?.role === 'alert' && JSON.stringify(node).includes('超时')));
   assert.deepEqual(f.calls.map(call => call.action), ['config']); f.controller.dispose();
+});
+
+test('one click install posts once, polls progress and applies the auto-filled Python path', async () => {
+  const timers = [];
+  let polls = 0;
+  const f = await fixture({ values: { mode: 'cloud' }, reply: async action => {
+    if (action === 'setup-install') return ok({ status: 'ok', result: { status: 'setup_running', running: true,
+      python_path: 'C:/state/venv/Scripts/python.exe', state_dir: 'C:/state' } });
+    if (action === 'setup-install-status') {
+      polls += 1;
+      if (polls < 2) return ok({ status: 'ok', result: { status: 'setup_running', running: true } });
+      return ok({ status: 'ok', result: { status: 'prepared', running: false,
+        python_path: 'C:/state/venv/Scripts/python.exe', dependencies: { ytDlp: true, docx: true },
+        python_path_saved: true, config: { status: 'ok', revision: 5,
+          values: { ...defaults, pythonPath: 'C:/state/venv/Scripts/python.exe' }, secretConfigured: false } } });
+    }
+  }, controllerOptions: { setTimeout(fn) { const timer = { fn }; timers.push(timer); return timer; },
+    clearTimeout(timer) { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); } } });
+  await f.controller.load();
+  const pending = f.controller.install();
+  for (let step = 0; step < 12; step++) {
+    await flush();
+    const due = timers.splice(0);
+    if (!due.length) break;
+    due.forEach(timer => timer.fn());
+  }
+  assert.equal(await pending, true);
+  const snapshot = f.controller.snapshot();
+  assert.equal(snapshot.busy, false); assert.equal(snapshot.install.status, 'prepared');
+  assert.equal(snapshot.install.label, '运行环境已就绪');
+  assert.equal(snapshot.install.python, 'C:/state/venv/Scripts/python.exe');
+  assert.equal(snapshot.install.dependencies.ytDlp, true);
+  assert.equal(snapshot.install.dependencies.docx, true);
+  assert.equal(snapshot.values.pythonPath, 'C:/state/venv/Scripts/python.exe');
+  assert.equal(snapshot.revision, 5); assert.equal(snapshot.dirty, false);
+  assert.deepEqual(f.calls.map(call => call.action), ['config', 'setup-install', 'setup-install-status', 'setup-install-status']);
+  assert.equal(f.calls[1].request.method, 'POST');
+  assert.equal(f.calls[2].request.method, 'GET');
+  assert.equal(JSON.stringify(snapshot).includes(KEY), false);
+  f.controller.dispose();
+});
+
+test('install surfaces a configured custom interpreter without pretending it prepared anything', async () => {
+  const f = await fixture({ values: { mode: 'cloud', pythonPath: 'C:/Other/python.exe' },
+    reply: async action => action === 'setup-install' ? ok({ status: 'ok', result: { status: 'custom_python_configured',
+      running: false, message: '已配置自定义 Python；一键准备只创建插件托管环境。' } }) : undefined });
+  await f.controller.load();
+  assert.equal(await f.controller.install(), true);
+  const snapshot = f.controller.snapshot();
+  assert.equal(snapshot.install.status, 'custom_python_configured');
+  assert.match(snapshot.notice, /自定义 Python/);
+  assert.equal(JSON.stringify(snapshot).includes('已就绪'), false);
+  assert.deepEqual(f.calls.map(call => call.action), ['config', 'setup-install']);
+  f.controller.dispose();
 });
 
 test('component mount loads only config, and effect cleanup/StrictMode does not retain old controllers', async () => {

@@ -8,6 +8,7 @@ again and charge this operation against its overall ASR timeout.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 import hashlib
 import math
 import os
@@ -123,12 +124,15 @@ def prepare_cloud_audio(audio_path, directory, source, options):
     options uses existing protocol/timeout/max_bytes keys only. ffmpeg is found
     with shutil.which, never an options/config executable or installation step.
     No duration metadata is manufactured. stdout/stderr/stdin are DEVNULL and a
-    deliberately empty child environment prevents credential inheritance.
+    minimal child environment contains only task-local TMP/TEMP/TMPDIR, never
+    inherited credentials. All scratch files belong to the supplied directory.
     """
     process = None
     output = None
     initial = None
     root = None
+    completed = False
+    temporary = ExitStack()
     try:
         if not isinstance(source, dict) or not isinstance(options, dict):
             _fail('audio_invalid')
@@ -181,10 +185,13 @@ def prepare_cloud_audio(audio_path, directory, source, options):
                 '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k',
                 '-threads', '1', '-f', 'mp3', str(output)]
         budget.remaining()
+        scratch = temporary.enter_context(
+            tempfile.TemporaryDirectory(prefix='.ffmpeg-', dir=root))
+        child_env = {key: scratch for key in ('TMP', 'TEMP', 'TMPDIR')}
         try:
             process = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                       shell=False, close_fds=True, env={})
+                                       shell=False, close_fds=True, env=child_env, cwd=scratch)
         except FileNotFoundError:
             _fail('dependency_missing')
         while True:
@@ -213,6 +220,7 @@ def prepare_cloud_audio(audio_path, directory, source, options):
         if 'local_audio_transcoded' not in result['warnings']:
             result['warnings'].append('local_audio_transcoded')
         result.update(audio_bytes=final.st_size, audio_sha256=digest)
+        completed = True
         return output, result
     except CloudASRError:
         raise
@@ -223,5 +231,18 @@ def prepare_cloud_audio(audio_path, directory, source, options):
         # KeyboardInterrupt, kill and reap it before returning control.
         if process is not None and process.returncode is None:
             _reap(process)
-        # Partial files stay within the caller-owned temporary directory, which
-        # owns cleanup; never unlink a possibly swapped caller path here.
+        try:
+            # Verify the absolute parent and exact created inode before unlink;
+            # never remove the input audio, an existing output, or a swapped file.
+            if output is not None and initial is not None and not completed:
+                try:
+                    _safe_path(root)
+                    current = output.lstat()
+                    if (output.is_absolute() and output.parent == root
+                            and not output.is_symlink() and stat.S_ISREG(current.st_mode)
+                            and (current.st_dev, current.st_ino) == (initial.st_dev, initial.st_ino)):
+                        output.unlink()
+                except (OSError, CloudASRError):
+                    pass
+        finally:
+            temporary.close()

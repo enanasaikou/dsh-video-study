@@ -12,11 +12,19 @@ import { applyPlugin, createConfig, createSkillProvider, createToolDefinitions }
 const KEY = 'unit-test-key-DO-NOT-LEAK';
 const executable = resolve('fake-python.exe');
 const root = resolve('packages/dsh-video-study');
-const home = join(tmpdir(), 'video-study-test-home');
+const workspace = resolve('fake-video-study-workspace');
+const home = resolve('fake-home');
+const workspaceState = base => join(base, '.dsh-video-study', 'state');
+const exportArgs = { title: '工作区测试', markdown: '## 正文\n\n只导出已整理正文。' };
 
 function harness(config = {}, options = {}) {
-  const calls = [];
+  const calls = [], scratches = [], workspaceCalls = [], accessCalls = [];
   let counter = 0;
+  const createScratchImpl = async base => {
+    const record = { base, path: join(base, `.fake-scratch-${scratches.length + 1}`), disposals: 0 };
+    scratches.push(record);
+    return { path: record.path, dispose: async () => { record.disposals++; } };
+  };
   const spawnImpl = (command, args, spawnOptions) => {
     const record = { command, args, options: spawnOptions, stdin: '', kills: [], request: undefined };
     calls.push(record);
@@ -33,7 +41,7 @@ function harness(config = {}, options = {}) {
       return true;
     };
     child.stdin.once('finish', () => {
-      queueMicrotask(() => {
+      queueMicrotask(async () => {
         if (args.includes('-c')) {
           if (options.badProbe) {
             child.stdout.write('invalid probe'); child.emit('close', 1); return;
@@ -43,11 +51,13 @@ function harness(config = {}, options = {}) {
           return;
         }
         record.request = JSON.parse(record.stdin);
-        options.onRequest?.(record.request, record);
+        await options.onRequest?.(record.request, record);
         if (options.hang) return;
         const response = options.response ?? (record.request.operation === 'status'
           ? { status: 'dependency_missing', network_used: false, runtime_ready: false }
-          : { status: 'ok', output: record.request.out, caption_kind: 'manual', warnings: [] });
+          : record.request.directory
+            ? { status: 'ok', document_file: join(record.request.directory, 'safe.' + record.request.format), warnings: [] }
+            : { status: 'ok', output: record.request.out, caption_kind: 'manual', warnings: [] });
         child.stdout.write(options.rawStdout ?? JSON.stringify(response));
         child.emit('close', options.exitCode ?? (response.status === 'ok' ? 0 : 2));
       });
@@ -55,11 +65,21 @@ function harness(config = {}, options = {}) {
     return child;
   };
   const runtime = createRuntime(config, { spawnImpl, root,
-    accessImpl: async () => { throw new Error('not installed'); },
-    homedirImpl: () => home, tmpdirImpl: () => tmpdir(), uuidImpl: () => `test-uuid-${++counter}`,
-    platform: process.platform, terminateImpl: async child => { child.kill('SIGTERM'); },
+    accessImpl: async path => { accessCalls.push(path); throw new Error('not installed'); },
+    getWorkspace: async execution => { workspaceCalls.push(execution); return workspace; },
+    createScratchImpl,
+    // 宿主托管的状态目录允许落在用户主目录；任务产物仍不得使用它。
+    homedirImpl: () => home,
+    tmpdirImpl: () => { throw Error('must not use global temp fallback'); },
+    uuidImpl: () => `test-uuid-${++counter}`,
+    platform: process.platform, terminateImpl: async child => { child.kill('SIGTERM'); return true; },
     ...options.dependencies });
-  return { runtime, calls, requests: () => calls.filter(call => !call.args.includes('-c')).map(call => call.request) };
+  // Legacy cases exercise their original backend/auth/path behavior. New choice
+  // gate cases instantiate createRuntime directly, without this fixture default.
+  const extract = runtime.extract;
+  runtime.extract = (args = {}, execution) => extract({ outputStyle: 'verbatim', ...args }, execution);
+  return { runtime, calls, scratches, workspaceCalls, accessCalls, home,
+    requests: () => calls.filter(call => !call.args.includes('-c')).map(call => call.request) };
 }
 
 function unavailableCloudConfig(mode = 'captions') {
@@ -86,9 +106,9 @@ const ref = initial => ({ value: initial, get() { return this.value; }, set(valu
 
 test('native live refs change the next extraction without recreating runtime', async () => {
   const mode = ref('captions'), endpoint = ref('https://asr.example/v1/audio/transcriptions');
-  const key = ref(KEY), consent = ref(false), modelDir = ref(resolve('fake-local-model'));
+  const key = ref(KEY), consent = ref(false);
   const h = harness({ mode, cloudEndpoint: endpoint, cloudApiKey: key, cloudModel: ref('model'),
-    cloudUploadConsent: consent, localModelDir: modelDir });
+    cloudUploadConsent: consent });
   await h.runtime.extract({ target: 'abcdefghijk' });
   assert.equal(h.requests()[0].config.mode, 'captions');
   assert.equal('cloudApiKey' in h.requests()[0].config, false);
@@ -98,11 +118,11 @@ test('native live refs change the next extraction without recreating runtime', a
   assert.equal(h.requests()[1].config.cloudApiKey, KEY);
   assert.equal(h.requests()[1].config.cloudUploadConsent, true);
   assert.equal(h.requests()[1].config.cloudEndpoint, endpoint.value);
-  mode.set('local');
-  key.get = () => { throw Error('local must not read cloud key'); };
+  mode.set('captions');
+  key.get = () => { throw Error('captions must not read cloud key'); };
   await h.runtime.extract({ target: 'abcdefghijk' });
-  assert.equal(h.requests()[2].config.mode, 'local');
-  assert.equal(h.requests()[2].config.localModelDir, modelDir.value);
+  assert.equal(h.requests()[2].config.mode, 'captions');
+  assert.equal('cloudApiKey' in h.requests()[2].config, false);
 });
 
 test('caption-only with volatile config never dereferences unselected ASR secrets or limits', async () => {
@@ -122,7 +142,7 @@ test('an in-flight extraction keeps one settings snapshot while the next uses th
   const h = harness({ mode, cloudApiKey: key, cloudEndpoint: endpoint, cloudModel: ref('model'),
     pythonPath, outputDir }, { dependencies: { getBiliCredential: async () => { await gate; return { source: 'anonymous' }; } } });
   const pending = h.runtime.extract({ target: BILI_URL });
-  mode.set('local'); pythonPath.set(resolve('new-python.exe')); outputDir.set(resolve('new-output'));
+  mode.set('captions'); pythonPath.set(resolve('new-python.exe')); outputDir.set(resolve('new-output'));
   endpoint.set('https://new.example/v1/audio/transcriptions');
   release(); await pending;
   assert.equal(h.requests()[0].config.mode, 'cloud');
@@ -130,22 +150,28 @@ test('an in-flight extraction keeps one settings snapshot while the next uses th
   assert.ok(h.requests()[0].out.startsWith(resolve('old-output')));
   assert.equal(h.calls[0].command, resolve('old-python.exe'));
   await h.runtime.extract({ target: 'abcdefghijk' });
-  assert.equal(h.requests()[1].config.mode, 'local');
+  assert.equal(h.requests()[1].config.mode, 'captions');
   assert.ok(h.requests()[1].out.startsWith(resolve('new-output')));
   assert.equal(h.calls[2].command, resolve('new-python.exe'));
 });
 
-test('setup snapshots live Python, state and model fields before asynchronous probing', async () => {
-  const mode = ref('local'), model = ref('small'), state = ref(resolve('old-state')), proxy = ref('');
-  const h = harness({ mode, localModel: model, stateDir: state, proxy });
+test('setup snapshots live backend, state and proxy before asynchronous probing', async () => {
+  const mode = ref('cloud'), state = ref(resolve('old-state')), proxy = ref('');
+  const h = harness({ mode, stateDir: state, proxy });
   const pending = h.runtime.setup();
-  model.set('tiny'); state.set(resolve('new-state')); proxy.set('http://127.0.0.1:8080');
+  mode.set('captions'); state.set(resolve('new-state')); proxy.set('http://127.0.0.1:8080');
   const first = await pending;
   assert.equal(first.status, 'setup_command_prepared');
-  assert.equal(first.local_model_dir, join(resolve('old-state'), 'models', 'small'));
+  assert.equal(first.backend, 'cloud');
+  assert.equal(first.state_dir, resolve('old-state'));
+  assert.equal('local_model_dir' in first, false);
+  assert.equal(first.command.includes('--model'), false);
   assert.equal(first.command.includes('--proxy'), false);
   const second = await h.runtime.setup();
-  assert.equal(second.local_model_dir, join(resolve('new-state'), 'models', 'tiny'));
+  assert.equal(second.backend, 'captions');
+  assert.equal(second.state_dir, resolve('new-state'));
+  assert.equal('local_model_dir' in second, false);
+  assert.equal(second.command.includes('--model'), false);
   assert.equal(second.command.includes('--proxy'), true);
 });
 
@@ -240,28 +266,267 @@ test('tool parameters cannot supply managed sessions or drive login flows', asyn
   }
 });
 
+test('host adapter resolves workspace only through execution agent and signal, never process cwd', async () => {
+  let dependencies;
+  const ensured = [], effects = [];
+  const ctx = { workingDirectory: { async ensure(agent, signal) { ensured.push({ agent, signal }); return workspace; } },
+    tools: { register() {} }, inject() {}, effect(callback) { effects.push(callback()); } };
+  const runtime = { dispose: async () => {} };
+  applyPlugin(ctx, { registerSkill: false }, { defineTool: value => value,
+    storeFactory: () => ({}), authFactory: () => ({ dispose: async () => {} }),
+    runtimeFactory(_config, deps) { dependencies = deps; return runtime; } });
+  try {
+    assert.equal(typeof dependencies.getWorkspace, 'function');
+    const agent = { id: 'session-specific-agent' }, controller = new AbortController();
+    assert.equal(await dependencies.getWorkspace({ agent, signal: controller.signal }), workspace);
+    assert.deepEqual(ensured, [{ agent, signal: controller.signal }]);
+    assert.equal(await dependencies.getWorkspace({}), null);
+    assert.equal(ensured.length, 1);
+  } finally { await effects[0](); }
+});
+
+test('workspace defaults are request-local for transcripts and documents, while the environment stays hosted', async () => {
+  const execution = { agent: { id: 'workspace-agent' } };
+  const h = harness();
+  assert.equal((await h.runtime.extract({ target: 'abcdefghijk' }, execution)).status, 'ok');
+  assert.equal((await h.runtime.exportDocument(exportArgs, execution)).status, 'ok');
+  const setup = await h.runtime.setup({}, execution);
+  assert.equal(setup.state_dir, hostedState);
+  assert.equal(h.requests()[0].out, join(workspace, 'video-study', 'transcripts', 'dsh-video-study-test-uuid-1'));
+  assert.equal(h.requests()[1].directory, join(workspace, 'video-study', 'documents'));
+  assert.deepEqual(h.scratches.map(value => value.base), [join(workspace, 'video-study', 'transcripts'), join(workspace, 'video-study', 'documents')]);
+  assert.ok(h.workspaceCalls.every(value => value === execution));
+  assert.ok(h.accessCalls.every(value => value.startsWith(hostedState)));
+  assert.ok(h.calls.every(value => value.options.cwd === workspace));
+  assert.ok(h.scratches.every(value => value.disposals === 1));
+});
+
+test('two concurrent workspaces keep separate output, probe environment and cleanup', async () => {
+  const a = resolve('workspace-A'), b = resolve('workspace-B');
+  let releaseA, enteredA;
+  const gateA = new Promise(done => { releaseA = done; });
+  const startedA = new Promise(done => { enteredA = done; });
+  const h = harness({}, { dependencies: { getWorkspace: async execution => execution.workspace },
+    onRequest: async request => { if (request.target === 'aaaaaaaaaaa') { enteredA(); await gateA; } } });
+  const first = h.runtime.extract({ target: 'aaaaaaaaaaa' }, { workspace: a });
+  await startedA;
+  try {
+    assert.equal(h.scratches[0].disposals, 0);
+    assert.equal((await h.runtime.extract({ target: 'bbbbbbbbbbb' }, { workspace: b })).status, 'ok');
+    assert.equal(h.scratches[0].disposals, 0);
+    assert.equal(h.scratches[1].disposals, 1);
+    const [one, two] = h.requests();
+    assert.equal(one.out.startsWith(join(a, 'video-study', 'transcripts')), true);
+    assert.equal(two.out.startsWith(join(b, 'video-study', 'transcripts')), true);
+    for (const base of [a, b]) {
+      const scratch = h.scratches.find(value => value.base.startsWith(base));
+      const calls = h.calls.filter(value => value.options.cwd === base);
+      assert.equal(calls.length, 2);
+      for (const call of calls) for (const key of ['TMP', 'TEMP', 'TMPDIR']) assert.equal(call.options.env[key], scratch.path);
+    }
+  } finally { releaseA(); await first; }
+  assert.ok(h.scratches.every(value => value.disposals === 1));
+});
+
+test('switching workspaces on the same runtime updates all default paths on the next request', async () => {
+  let selected = resolve('workspace-first');
+  const h = harness({}, { dependencies: { getWorkspace: async () => selected } });
+  for (const base of [resolve('workspace-first'), resolve('workspace-second')]) {
+    selected = base;
+    assert.equal((await h.runtime.extract({ target: 'abcdefghijk' })).status, 'ok');
+    assert.equal((await h.runtime.exportDocument(exportArgs)).status, 'ok');
+    assert.equal((await h.runtime.setup()).state_dir, hostedState);
+  }
+  assert.deepEqual(h.requests().map(value => value.directory ?? resolve(value.out, '..')), [
+    join(resolve('workspace-first'), 'video-study', 'transcripts'), join(resolve('workspace-first'), 'video-study', 'documents'),
+    join(resolve('workspace-second'), 'video-study', 'transcripts'), join(resolve('workspace-second'), 'video-study', 'documents'),
+  ]);
+});
+
+test('explicit output, document and state paths override workspace defaults independently', async () => {
+  const outputDir = resolve('explicit-transcripts'), documentOutputDir = resolve('explicit-documents'), stateDir = resolve('explicit-state');
+  const h = harness({ outputDir, documentOutputDir, stateDir });
+  await h.runtime.extract({ target: 'abcdefghijk' }); await h.runtime.exportDocument(exportArgs);
+  assert.equal((await h.runtime.setup()).state_dir, stateDir);
+  assert.equal(resolve(h.requests()[0].out, '..'), outputDir);
+  assert.equal(h.requests()[1].directory, documentOutputDir);
+  assert.deepEqual(h.scratches.map(value => value.base), [outputDir, documentOutputDir]);
+  assert.ok(h.accessCalls.every(value => value.startsWith(stateDir)));
+  assert.ok(h.calls.every(value => value.options.cwd === workspace));
+});
+
+test('explicit paths work without session and use the selected base as child cwd', async () => {
+  const outputDir = resolve('headless-transcripts'), documentOutputDir = resolve('headless-documents'), stateDir = resolve('headless-state');
+  const h = harness({ outputDir, documentOutputDir, stateDir }, { dependencies: { getWorkspace: async () => null } });
+  assert.equal((await h.runtime.extract({ target: 'abcdefghijk' })).status, 'ok');
+  assert.equal((await h.runtime.exportDocument(exportArgs)).status, 'ok');
+  assert.equal((await h.runtime.setup()).state_dir, stateDir);
+  assert.ok(h.calls.slice(0, 2).every(value => value.options.cwd === outputDir));
+  assert.ok(h.calls.slice(2, 4).every(value => value.options.cwd === documentOutputDir));
+  assert.equal(h.calls[4].args.includes('-c'), true);
+});
+
+test('missing workspace fails closed for task outputs but setup still prepares a command', async () => {
+  const config = { mode: 'cloud' };
+  for (const field of ['cloudApiKey', 'cloudApiKeyFile', 'cloudEndpoint', 'cloudUploadConsent', 'youtubeCookieFile', 'biliCookieFile'])
+    Object.defineProperty(config, field, { get() { assert.fail('must not read ' + field); } });
+  const h = harness(config, { dependencies: { getWorkspace: async () => null,
+    getBiliCredential: async () => { assert.fail('must not read auth'); } } });
+  assert.equal((await h.runtime.extract({ target: BILI_URL })).status, 'workspace_required');
+  assert.equal((await h.runtime.exportDocument(exportArgs)).status, 'workspace_required');
+  assert.equal(h.calls.length, 0); assert.equal(h.scratches.length, 0); assert.equal(h.accessCalls.length, 0);
+  // 运行环境属于宿主安装而非任务产物，设置页没有会话也要能生成部署命令。
+  const prepared = await h.runtime.setup();
+  assert.equal(prepared.status, 'setup_command_prepared');
+  assert.ok(isAbsolute(prepared.state_dir));
+  assert.equal(h.scratches.length, 0);
+});
+
+test('unrelated explicit setting cannot authorize another operation default without workspace', async () => {
+  for (const [operation, config, args] of [
+    ['extract', { stateDir: resolve('explicit-state'), documentOutputDir: resolve('explicit-documents') }, { target: 'abcdefghijk' }],
+    ['exportDocument', { stateDir: resolve('explicit-state'), outputDir: resolve('explicit-transcripts') }, exportArgs],
+  ]) {
+    const h = harness(config, { dependencies: { getWorkspace: async () => null } });
+    assert.equal((await h.runtime[operation](args)).status, 'workspace_required');
+    assert.equal(h.calls.length, 0); assert.equal(h.scratches.length, 0);
+  }
+  const h = harness({ outputDir: resolve('explicit-transcripts') }, { dependencies: { getWorkspace: async () => null } });
+  assert.equal((await h.runtime.setup()).status, 'setup_command_prepared');
+});
+
+test('missing workspace provider, failed provider and relative provider result never fall back', async () => {
+  for (const getWorkspace of [undefined, async () => { throw Error('PRIVATE_WORKSPACE_FAILURE'); }, async () => 'relative-workspace']) {
+    const h = harness({}, { dependencies: { getWorkspace } });
+    const result = await h.runtime.extract({ target: 'abcdefghijk' });
+    assert.notEqual(result.status, 'ok');
+    assert.equal(h.calls.length, 0); assert.equal(h.scratches.length, 0);
+    assert.equal(JSON.stringify(result).includes('PRIVATE_WORKSPACE_FAILURE'), false);
+  }
+});
+
+test('status without a session is offline, write-free and probes only the hosted managed venv', async () => {
+  const h = harness(unavailableCloudConfig(), { dependencies: { getWorkspace: async () => null } });
+  assert.equal((await h.runtime.status()).status, 'dependency_missing');
+  assert.equal(h.scratches.length, 0);
+  // 没有会话时状态目录回落到托管位置：只读探测该处解释器，找到就优先使用。
+  assert.equal(h.accessCalls.length, 1); assert.ok(h.accessCalls[0].startsWith(hostedState));
+  assert.equal(h.calls[0].command, process.platform === 'win32' ? 'python' : 'python3');
+  const explicitState = resolve('headless-managed-state'), accessed = [];
+  const configured = harness({ stateDir: explicitState }, { dependencies: { getWorkspace: async () => null,
+    accessImpl: async path => { accessed.push(path); } } });
+  await configured.runtime.status();
+  assert.equal(accessed.length, 1); assert.ok(accessed[0].startsWith(explicitState));
+  assert.equal(configured.calls[0].command, accessed[0]); assert.equal(configured.scratches.length, 0);
+});
+
+test('request-local temp env applies to probes and runner without changing global TMP settings', async () => {
+  const before = Object.fromEntries(['TMP', 'TEMP', 'TMPDIR'].map(key => [key, process.env[key]]));
+  const h = harness();
+  for (const [operation, args] of [['extract', { target: 'abcdefghijk' }], ['exportDocument', exportArgs]]) {
+    const start = h.calls.length;
+    assert.equal((await h.runtime[operation](args)).status, 'ok');
+    const scratch = h.scratches.at(-1);
+    for (const call of h.calls.slice(start)) {
+      assert.notEqual(call.options.env, process.env);
+      for (const key of ['TMP', 'TEMP', 'TMPDIR']) assert.equal(call.options.env[key], scratch.path);
+      const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path');
+      if (pathKey) assert.equal(call.options.env[pathKey], process.env[pathKey]);
+    }
+    assert.equal(scratch.disposals, 1);
+  }
+  assert.deepEqual(Object.fromEntries(['TMP', 'TEMP', 'TMPDIR'].map(key => [key, process.env[key]])), before);
+});
+
+test('scratch write denial never retries in home, global temp or another output base', async () => {
+  for (const operation of ['extract', 'exportDocument']) {
+    const attempted = [];
+    const h = harness({}, { dependencies: { createScratchImpl: async base => {
+      attempted.push(base); throw Object.assign(Error('PRIVATE_SCRATCH_FAILURE'), { code: 'EACCES' });
+    } } });
+    const result = await h.runtime[operation](operation === 'extract' ? { target: 'abcdefghijk' } : exportArgs);
+    assert.notEqual(result.status, 'ok'); assert.equal(h.calls.length, 0);
+    assert.deepEqual(attempted, [join(workspace, 'video-study', operation === 'extract' ? 'transcripts' : 'documents')]);
+    assert.equal(JSON.stringify(result).includes('PRIVATE_SCRATCH_FAILURE'), false);
+  }
+});
+
+test('scratch is disposed on bad probe, spawn errors, bad JSON and runner failures', async () => {
+  for (const options of [{ badProbe: true }, { spawnError: 'EACCES' }, { rawStdout: 'invalid JSON' },
+    { response: { status: 'network_error' } }, { response: { status: 'ok' }, exitCode: 1 }]) {
+    for (const [operation, args] of [['extract', { target: 'abcdefghijk' }], ['exportDocument', exportArgs]]) {
+      const h = harness({}, options);
+      assert.notEqual((await h.runtime[operation](args)).status, 'ok');
+      assert.equal(h.scratches.length, 1); assert.equal(h.scratches[0].disposals, 1);
+    }
+  }
+});
+
+test('confirmed extraction and export cancellation disposes only after tree termination', async () => {
+  for (const [operation, args] of [['extract', { target: 'abcdefghijk' }], ['exportDocument', exportArgs]]) {
+    const controller = new AbortController();
+    let started, release;
+    const terminating = new Promise(done => { started = done; });
+    const gate = new Promise(done => { release = done; });
+    const h = harness({}, { hang: true, onRequest() { controller.abort(); }, dependencies: {
+      terminateImpl: async child => { child.kill('SIGTERM'); started(); await gate; return true; },
+    } });
+    const pending = h.runtime[operation](args, { signal: controller.signal });
+    await terminating;
+    try { assert.equal(h.scratches[0].disposals, 0); }
+    finally { release(); }
+    assert.equal((await pending).status, 'cancelled'); assert.equal(h.scratches[0].disposals, 1);
+  }
+});
+
+test('unconfirmed parent or descendant termination retains scratch and warns for both operations', async () => {
+  const keepAlive = setTimeout(() => {}, 3000);
+  try {
+    for (const neverExit of [false, true]) for (const [operation, args] of [['extract', { target: 'abcdefghijk' }], ['exportDocument', exportArgs]]) {
+      const controller = new AbortController();
+      const h = harness({}, { hang: true, neverExit, onRequest() { controller.abort(); }, dependencies: {
+        timeoutScale: 0.0001, terminateImpl: async child => { child.kill('SIGTERM'); return false; },
+      } });
+      const result = await h.runtime[operation](args, { signal: controller.signal });
+      assert.equal(result.status, 'cancelled'); assert.equal(h.scratches.length, 1);
+      assert.equal(h.scratches[0].disposals, 0);
+      assert.ok(result.warnings?.some(value => /临时|scratch/i.test(value)));
+    }
+  } finally { clearTimeout(keepAlive); }
+});
+
+test('setup never creates scratch or writes temp environment, even with explicit headless state', async () => {
+  for (const getWorkspace of [async () => workspace, async () => null]) {
+    const h = harness({ stateDir: resolve('manual-setup-state') }, { dependencies: { getWorkspace,
+      createScratchImpl: async () => { assert.fail('setup must not create scratch'); } } });
+    assert.equal((await h.runtime.setup()).status, 'setup_command_prepared');
+    assert.equal(h.calls.length, 1); assert.equal(h.calls[0].args.includes('-c'), true);
+  }
+});
+
 test('defaults are portable, captions-only and do not authorize upload', () => {
   assert.equal(DEFAULTS.mode, 'captions');
   assert.equal(DEFAULTS.cloudUploadConsent, false);
-  assert.equal(DEFAULTS.localDevice, 'cpu');
-  assert.equal(DEFAULTS.localComputeType, 'int8');
+  for (const field of ['localModel', 'localModelDir', 'localDevice', 'localComputeType'])
+    assert.equal(field in DEFAULTS, false);
   assert.equal(DEFAULTS.defaultLanguage, 'auto');
   assert.equal(JSON.stringify(DEFAULTS).includes('enana'), false);
 });
 
 test('native Config exposes live mode and secret fields without losing the secret UI role', () => {
   const schema = createConfig(fakeSchemastery()).shape;
-  assert.deepEqual(schema.mode.choices, ['captions', 'cloud', 'local']);
+  assert.deepEqual(schema.mode.choices, ['captions', 'cloud']);
+  for (const field of ['localModel', 'localModelDir', 'localDevice', 'localComputeType'])
+    assert.equal(field in schema, false);
   assert.equal(schema.mode.defaultValue, 'captions');
   assert.equal(schema.cloudApiKey.roleValue, 'secret');
-  for (const name of ['mode', 'defaultLanguage', 'cloudApiKey', 'cloudUploadConsent', 'localModelDir', 'pythonPath'])
+  for (const name of ['mode', 'defaultLanguage', 'cloudApiKey', 'cloudUploadConsent', 'pythonPath'])
     assert.equal(schema[name].live, true);
   assert.equal(schema.cloudUploadConsent.defaultValue, false);
-  for (const field of ['pythonPath', 'stateDir', 'outputDir', 'localModelDir', 'cloudEndpoint', 'cloudApiKeyFile', 'proxy'])
+  for (const field of ['pythonPath', 'stateDir', 'outputDir', 'cloudEndpoint', 'cloudApiKeyFile', 'proxy'])
     assert.equal(schema[field].defaultValue, '');
-  assert.equal(schema.localModel.defaultValue, 'small');
   assert.equal(schema.defaultLanguage.defaultValue, 'auto');
-  for (const name of ['mode', 'localModel', 'cloudEndpoint', 'cloudUploadConsent'])
+  for (const name of ['mode', 'cloudEndpoint', 'cloudUploadConsent'])
     assert.equal(typeof schema[name].descriptionValue, 'string');
 });
 
@@ -290,17 +555,13 @@ test('captionsOnly is a one-way restriction and never reads cloud getters', asyn
   assert.equal(requests()[0].captionsOnly, true);
 });
 
-test('local mode never reads cloud configuration and uses portable state model directory', async () => {
-  const { runtime, requests } = harness(unavailableCloudConfig('local'));
-  assert.equal((await runtime.extract({ target: 'abcdefghijk', language: 'en' })).status, 'ok');
-  const request = requests()[0];
-  assert.equal(request.config.mode, 'local');
-  assert.equal(request.config.localModelDir, '');
-  assert.equal(request.config.localModel, 'small');
-  assert.equal(request.config.stateDir, join(home, '.dsh', 'state', 'dsh-video-study'));
-  assert.equal(request.config.localDevice, 'cpu');
-  assert.equal(request.config.localComputeType, 'int8');
-  assert.equal(request.language, 'en');
+test('local backend is rejected before Python or cloud credential access', async () => {
+  for (const operation of ['extract', 'status', 'setup']) {
+    const { runtime, calls } = harness(unavailableCloudConfig('local'));
+    const result = await runtime[operation](operation === 'extract' ? { target: 'abcdefghijk' } : {});
+    assert.equal(result.status, 'invalid_config');
+    assert.equal(calls.length, 0);
+  }
 });
 
 test('no tool argument can opt into cloud or provide a secret/output override', async () => {
@@ -319,7 +580,7 @@ test('forceAsr in captions mode is rejected before Python/network activity', asy
 });
 
 test('captionsOnly plus forceAsr cannot escape configured ASR restrictions', async () => {
-  const { runtime, calls } = harness({ mode: 'local' });
+  const { runtime, calls } = harness({ mode: 'cloud' });
   assert.equal((await runtime.extract({ target: 'abcdefghijk', forceAsr: true, captionsOnly: true })).status, 'mode_restricted');
   assert.equal(calls.length, 0);
 });
@@ -340,9 +601,8 @@ test('cloud without consent still permits ordinary existing-caption extraction',
   assert.equal(requests()[0].forceAsr, false);
 });
 
-test('unconfigured ASR backends do not preflight models/endpoints before valid captions', async () => {
+test('unconfigured cloud backend does not preflight models/endpoints before valid captions', async () => {
   for (const config of [
-    { mode: 'local', localModelDir: join(tmpdir(), 'nonexistent-video-study-model') },
     { mode: 'cloud', cloudEndpoint: 'not-a-usable-endpoint', cloudModel: '', cloudApiKeyFile: 'missing-keyfile', cloudUploadConsent: false },
   ]) {
     const { runtime, requests } = harness(config);
@@ -368,12 +628,9 @@ test('cloud audio size is preserved for Python fallback validation, not enforced
 test('zero, negative and relative-state ASR settings cannot block existing captions', async () => {
   const fixtures = [
     { mode: 'captions', asrTimeout: 0, downloadTimeout: -1, maxDuration: -1,
-      stateDir: 'relative-state', localModel: 'unsupported', cloudMaxAudioMiB: 0 },
+      stateDir: 'relative-state', cloudMaxAudioMiB: 0 },
     { mode: 'cloud', asrTimeout: 0, downloadTimeout: -1, maxDuration: 0,
       stateDir: 'relative-state', cloudMaxAudioMiB: -1, cloudEndpoint: null, cloudModel: null },
-    { mode: 'local', asrTimeout: -1, downloadTimeout: 0, maxDuration: -1,
-      stateDir: 'relative-state', localModelDir: 'relative-model', localModel: 'unsupported',
-      localDevice: 'unsupported', localComputeType: null },
   ];
   for (const config of fixtures) {
     const { runtime, requests } = harness(config);
@@ -387,12 +644,7 @@ test('zero, negative and relative-state ASR settings cannot block existing capti
     } else {
       for (const field of ['asrTimeout', 'downloadTimeout', 'maxDuration'])
         assert.equal(forwarded[field], config[field]);
-      if (config.mode === 'local') {
-        assert.equal(forwarded.stateDir, 'relative-state');
-        assert.equal(forwarded.localModel, 'unsupported');
-        assert.equal(forwarded.localModelDir, 'relative-model');
-        assert.equal(forwarded.localComputeType, null);
-      } else assert.equal(forwarded.cloudMaxAudioMiB, -1);
+      assert.equal(forwarded.cloudMaxAudioMiB, -1);
     }
   }
 });
@@ -407,13 +659,13 @@ test('caption-only ignores backend-only limit/model getters and unusable managed
 });
 
 test('safe default scheduling does not validate ASR or read it for caption-only', () => {
-  assert.equal(extractionBudgetMs({ mode: 'local', downloadTimeout: -1, asrTimeout: 0 }), 7620000);
+  assert.equal(extractionBudgetMs({ mode: 'cloud', downloadTimeout: -1, asrTimeout: 0 }), 7620000);
   assert.equal(extractionBudgetMs({ mode: 'cloud', downloadTimeout: NaN, asrTimeout: 'bad' }), 7620000);
   const captions = { mode: 'captions', get asrTimeout() { throw new Error('unrelated'); },
     get downloadTimeout() { throw new Error('unrelated'); } };
   assert.equal(extractionBudgetMs(captions), 420000);
   assert.equal(createToolDefinitions(captions, {})[1].timeoutMs, 450000);
-  assert.equal(createToolDefinitions({ mode: 'local', asrTimeout: 0, downloadTimeout: -1 }, {})[1].timeoutMs, 7650000);
+  assert.equal(createToolDefinitions({ mode: 'cloud', asrTimeout: 0, downloadTimeout: -1 }, {})[1].timeoutMs, 7650000);
 });
 
 test('relative stateDir skips only managed discovery, while setup remains strict', async () => {
@@ -514,8 +766,8 @@ test('py -3 compatibility uses separate argv rather than a shell command', async
 
 test('managed environment is probed before system executables', async () => {
   const managed = process.platform === 'win32'
-    ? join(home, '.dsh', 'state', 'dsh-video-study', 'venv', 'Scripts', 'python.exe')
-    : join(home, '.dsh', 'state', 'dsh-video-study', 'venv', 'bin', 'python');
+    ? join(hostedState, 'venv', 'Scripts', 'python.exe')
+    : join(hostedState, 'venv', 'bin', 'python');
   const { runtime, calls } = harness({}, { dependencies: { accessImpl: async () => {} } });
   await runtime.status({});
   assert.equal(calls[0].command, managed);
@@ -551,10 +803,10 @@ test('nonzero runner exit cannot return a success marker', async () => {
 
 test('network and permission errors pass through without retry or backend switch', async () => {
   for (const status of ['network_error', 'login_required', 'rate_limited', 'platform_restricted']) {
-    const { runtime, requests } = harness({ mode: 'local' }, { response: { status, success: false } });
+    const { runtime, requests } = harness({ mode: 'cloud' }, { response: { status, success: false } });
     assert.equal((await runtime.extract({ target: 'abcdefghijk' })).status, status);
     assert.equal(requests().length, 1);
-    assert.equal(requests()[0].config.mode, 'local');
+    assert.equal(requests()[0].config.mode, 'cloud');
   }
 });
 
@@ -632,20 +884,41 @@ test('dispose cancels every active Python operation', async () => {
 });
 
 test('setup returns only an explicit manual command, never invokes setup script', async () => {
-  const { runtime, calls } = harness({ mode: 'local', proxy: 'http://127.0.0.1:7897' });
-  const result = await runtime.setup({ backend: 'local', model: 'tiny' });
+  const { runtime, calls } = harness({ mode: 'cloud', proxy: 'http://127.0.0.1:7897' });
+  const result = await runtime.setup({ backend: 'cloud' });
   assert.equal(result.status, 'setup_command_prepared');
   assert.equal(result.executed, false);
   assert.match(result.command, /--allow-downloads/);
   assert.match(result.command, /setup_environment\.py/);
   assert.match(result.command, /--backend/);
-  assert.match(result.command, /tiny/);
+  assert.equal(result.command.includes('--model'), false);
+  assert.equal(result.backend, 'cloud');
   assert.match(result.command, /http:\/\/127\.0\.0\.1:7897/);
-  assert.equal(result.state_dir, join(home, '.dsh', 'state', 'dsh-video-study'));
-  assert.equal(result.local_model_dir, join(result.state_dir, 'models', 'tiny'));
+  assert.equal(result.state_dir, hostedState);
+  assert.equal('local_model_dir' in result, false);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].args.includes('-c'), true);
   assert.equal(result.command.includes(KEY), false);
+});
+
+test('localDefaults exposes only platform and the hosted install location without probing', () => {
+  const config = unavailableCloudConfig('cloud');
+  for (const field of ['localModel', 'localModelDir', 'localDevice', 'localComputeType'])
+    Object.defineProperty(config, field, { enumerable: true, get() { throw new Error('removed setting read'); } });
+  const { runtime, calls } = harness(config);
+  assert.deepEqual(runtime.localDefaults(), { platform: process.platform, stateDir: hostedState });
+  assert.equal(calls.length, 0);
+});
+
+test('setup rejects local backend and every model argument before probing', async () => {
+  for (const args of [{ backend: 'local' }, { model: 'tiny' }, { backend: 'cloud', model: 'small' }]) {
+    const { runtime, calls } = harness(unavailableCloudConfig('cloud'));
+    const result = await runtime.setup(args);
+    assert.equal(result.status, 'invalid_input');
+    assert.equal('command' in result, false);
+    assert.equal('local_model_dir' in result, false);
+    assert.equal(calls.length, 0);
+  }
 });
 
 test('setup never reads cloud credentials and refuses credentialed/socks proxy commands', async () => {
@@ -701,6 +974,8 @@ test('real process cancellation reaps the runner and its spawned descendant offl
     if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch {} }
   });
   const runtime = createRuntime({}, { spawnImpl: adapterSpawn,
+    getWorkspace: async () => null,
+    createScratchImpl: async () => { throw Error('status must not create scratch'); },
     accessImpl: async () => { throw new Error('no managed fixture'); } });
   const result = await runtime.status({}, { signal: controller.signal });
   assert.equal(result.status, 'cancelled');
@@ -756,6 +1031,8 @@ test('tool schema describes disabling-only captionsOnly and safe setup', () => {
   assert.match(definitions[2].parameters.markdown.description, /不写补全理论或防御性长备注/);
   assert.deepEqual(Object.keys(definitions[2].parameters), ['title', 'markdown', 'sourceUrl']);
   assert.equal(definitions[3].name, 'video_study_setup');
+  assert.deepEqual(Object.keys(definitions[3].parameters), ['backend']);
+  assert.deepEqual(definitions[3].parameters.backend.enum, ['captions', 'cloud']);
   assert.equal(definitions[0].timeoutMs, 45000);
 });
 
@@ -781,4 +1058,121 @@ test('recursive sanitizer drops credential-shaped keys, keeps public Bilibili id
   assert.equal(result.nested.value, '[redacted]');
   assert.equal('cloudApiKeyFile' in result.nested, false);
   assert.equal(result.source_url, 'https://www.bilibili.com/video/BV1xx411c7mD?p=2');
+});
+
+const hostedState = join(home, '.dsh', 'state', 'dsh-video-study');
+const venvPython = join(hostedState, 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+
+function installHarness(options = {}) {
+  const calls = [], scratch = { path: join(workspace, '.fake-install-scratch'), bases: [], disposals: 0 };
+  const spawnImpl = (command, args, spawnOptions) => {
+    const record = { command, args, options: spawnOptions };
+    calls.push(record);
+    const child = new EventEmitter();
+    child.pid = 4321; child.stdout = new PassThrough(); child.stdin = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => true;
+    child.stdin.once('finish', () => queueMicrotask(async () => {
+      if (args.some(arg => arg.includes('importlib'))) {
+        const probe = options.dependencies ?? { ytDlp: true, docx: true };
+        child.stdout.write(JSON.stringify(probe)); child.emit('close', 0); return;
+      }
+      if (args.includes('-c')) {
+        child.stdout.write(JSON.stringify({ executable, version: [3, 13] })); child.emit('close', 0); return;
+      }
+      if (options.hold) await options.hold;
+      const script = options.scriptResult ?? { status: 'prepared_not_runtime_verified', python: venvPython,
+        state_dir: hostedState };
+      child.stdout.write(typeof script === 'string' ? script : JSON.stringify(script));
+      child.emit('close', options.exitCode ?? 0);
+    }));
+    return child;
+  };
+  const runtime = createRuntime({ mode: 'cloud', ...options.config }, { spawnImpl, root,
+    accessImpl: async () => { throw new Error('not installed'); },
+    getWorkspace: async () => workspace,
+    createScratchImpl: async base => { scratch.bases.push(base);
+      return { path: scratch.path, dispose: async () => { scratch.disposals += 1; } }; },
+    homedirImpl: () => home,
+    tmpdirImpl: () => { throw Error('must not use global temp fallback'); },
+    uuidImpl: () => 'install-uuid', platform: process.platform,
+    terminateImpl: async child => { child.kill('SIGTERM'); return true; }, ...options.dependencies });
+  return { runtime, calls, scratch, home,
+    scripts: () => calls.filter(record => record.args.some(arg => arg.endsWith(join('python', 'setup_environment.py')))) };
+}
+
+async function settled(runtime) {
+  for (let step = 0; step < 400; step += 1) {
+    const status = runtime.setupInstallStatus();
+    if (status.status !== 'setup_running') return status;
+    await new Promise(resolveDone => setImmediate(resolveDone));
+  }
+  return runtime.setupInstallStatus();
+}
+
+test('one click install refuses a custom interpreter before any process or write', async () => {
+  const f = installHarness({ config: { pythonPath: '/custom/python3' } });
+  const result = await f.runtime.setupInstall({}, {});
+  assert.equal(result.status, 'custom_python_configured');
+  assert.match(result.message, /自定义 Python/);
+  assert.equal(f.calls.length, 0); assert.equal(f.scratch.bases.length, 0);
+  assert.equal(f.runtime.setupInstallStatus().status, 'idle');
+});
+
+test('one click install runs the plugin setup CLI against the hosted state without a scratch dir', async () => {
+  const f = installHarness();
+  const started = await f.runtime.setupInstall({}, {});
+  assert.equal(started.status, 'setup_running'); assert.equal(started.running, true);
+  assert.equal(started.progress, '正在检查本机 Python…');
+  assert.equal(started.state_dir, hostedState);
+  const script = f.scripts()[0];
+  assert.deepEqual(script.args.slice(-5), ['--backend', 'cloud', '--state-dir', hostedState, '--allow-downloads']);
+  assert.equal(script.args.includes('--model'), false);
+  assert.equal(script.options.cwd, workspace);
+  assert.equal(script.options.shell, false);
+  assert.equal(script.args.some(value => /key|token|password/i.test(value)), false);
+  assert.equal(f.scratch.bases.length, 0);
+  const finished = await settled(f.runtime);
+  assert.equal(finished.status, 'prepared');
+  assert.equal(finished.python_path, venvPython);
+  assert.equal(finished.progress, undefined);
+  assert.deepEqual(finished.dependencies, { ytDlp: true, docx: true });
+  assert.equal(f.scripts().length, 1);
+  assert.equal(f.runtime.setupInstallStatus().status, 'prepared');
+});
+
+test('install reports an incomplete environment when the transcript dependency is missing', async () => {
+  const f = installHarness({ dependencies: { ytDlp: false, docx: true } });
+  await f.runtime.setupInstall({}, {});
+  const finished = await settled(f.runtime);
+  assert.equal(finished.status, 'setup_incomplete');
+  assert.deepEqual(finished.dependencies, { ytDlp: false, docx: true });
+  assert.match(finished.message, /yt-dlp/);
+});
+
+test('install failures stay static, keep the job inspectable and never echo third-party output', async () => {
+  const f = installHarness({ scriptResult: 'not json at all ' + KEY, exitCode: 1 });
+  await f.runtime.setupInstall({}, {});
+  const finished = await settled(f.runtime);
+  assert.equal(finished.status, 'setup_failed');
+  assert.equal(JSON.stringify(finished).includes(KEY), false);
+  const second = installHarness({ scriptResult: { status: 'setup_failed', message: '准备步骤失败；未显示第三方错误，目录保留。' } });
+  await second.runtime.setupInstall({}, {});
+  const failed = await settled(second.runtime);
+  assert.equal(failed.status, 'setup_failed');
+  assert.match(failed.message, /准备步骤失败/);
+});
+
+test('repeated install clicks do not spawn a second installer while one is preparing', async () => {
+  let release;
+  const hold = new Promise(resolveDone => { release = resolveDone; });
+  const f = installHarness({ hold });
+  await f.runtime.setupInstall({}, {});
+  const again = await f.runtime.setupInstall({}, {});
+  assert.equal(again.status, 'setup_running');
+  assert.equal(f.scripts().length, 1);
+  release(); await settled(f.runtime);
+  assert.equal(f.scripts().length, 1);
+  assert.equal((await f.runtime.setupInstall({ invalid: true }, {})).status, 'invalid_input');
+  assert.equal((await f.runtime.setupInstall({}, { signal: AbortSignal.abort() })).status, 'cancelled');
 });

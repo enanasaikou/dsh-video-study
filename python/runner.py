@@ -16,7 +16,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 
-MODES = ('captions', 'cloud', 'local')
+MODES = ('captions', 'cloud')
 LANGUAGES = ('en', 'zh', 'auto')
 # Protocol stage names are constants owned by the adapter modules; anything else
 # (provider text, ids, URLs) must never reach failure output.
@@ -25,6 +25,7 @@ RESULT_HOST = re.compile(r'[a-z0-9](?:[a-z0-9.-]{1,251})[a-z0-9]')
 FALLBACK_CODES = {'no_captions', 'language_unavailable'}
 MESSAGES = {
     'invalid_input': '参数无效，请检查模式、语言和新的绝对输出目录。',
+    'unsupported_backend': '云端版仅支持 captions/cloud；不支持 local 或其他后端。',
     'asr_disabled': '仅字幕模式不下载音轨、不启用 ASR。',
     'no_captions': '没有可用的已有字幕；仅字幕模式不下载音轨。',
     'language_unavailable': '没有符合要求的源语言字幕；不接受跨语言或自动翻译轨。',
@@ -53,7 +54,7 @@ def fail(code):
 def number(config, key, default):
     value = config.get(key, default)
     ceilings = {'downloadTimeout': 3600, 'asrTimeout': 86400, 'maxDuration': 86400,
-                'cloudMaxAudioMiB': 512, 'localMaxAudioMiB': 512}
+                'cloudMaxAudioMiB': 512}
     if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
             or value <= 0 or value > ceilings.get(key, float('inf'))):
         fail('invalid_input')
@@ -69,7 +70,9 @@ def text(config, key, default=''):
 
 def mode_of(request, config):
     mode = config.get('mode', 'captions')
-    if mode not in MODES or not isinstance(request.get('captionsOnly', False), bool):
+    if mode not in MODES:
+        fail('unsupported_backend')
+    if not isinstance(request.get('captionsOnly', False), bool):
         fail('invalid_input')
     return 'captions' if request.get('captionsOnly', False) else mode
 
@@ -100,6 +103,8 @@ def cloud_config(config, language, read_key=False):
 
 
 def status(config, mode):
+    if mode not in MODES:
+        fail('unsupported_backend')
     try:
         yt_version = importlib.metadata.version('yt-dlp')
     except importlib.metadata.PackageNotFoundError:
@@ -110,13 +115,7 @@ def status(config, mode):
               'asr_enabled': mode != 'captions', 'runtime_ready': False,
               'warnings': ['静态检查不证明平台可访问、字幕可靠或 ASR 可运行。']}
     if mode == 'captions':
-        result['backend'] = {'kind': 'none', 'needs_api': False, 'needs_local_model': False}
-    elif mode == 'local':
-        import local_asr
-        resolved_model = local_model_dir(config)
-        result['backend'] = local_asr.status_report(SimpleNamespace(model_dir=resolved_model))
-        result['backend']['resolved_model_dir'] = resolved_model
-        result['python_executable'] = sys.executable
+        result['backend'] = {'kind': 'none', 'needs_api': False}
     else:
         from cloud_asr import CloudASRError, validate_cloud_config
         try:
@@ -126,21 +125,6 @@ def status(config, mode):
         except CloudASRError as exc:
             result['backend'] = {'configured': False, 'status': exc.code, 'message': exc.message}
     return result
-
-
-def local_model_dir(config):
-    explicit = text(config, 'localModelDir')
-    if explicit:
-        if not Path(explicit).is_absolute():
-            fail('invalid_input')
-        return explicit
-    name = text(config, 'localModel', 'small')
-    if name not in ('tiny', 'base', 'small', 'medium', 'large-v3'):
-        fail('invalid_input')
-    state = text(config, 'stateDir') or str(Path.home() / '.dsh' / 'state' / 'dsh-video-study')
-    if not Path(state).is_absolute():
-        fail('invalid_input')
-    return str(Path(state) / 'models' / name)
 
 
 def bili_session(config):
@@ -229,29 +213,8 @@ def audio_cookie_options(request, config):
     return credentials
 
 
-def local_extract(request, config, out, reason):
-    import local_asr
-    credentials = audio_cookie_options(request, config)
-    args = SimpleNamespace(target=request['target'], model_dir=local_model_dir(config),
-        language=request.get('language', 'auto'), reason=reason, out=str(out),
-        page=request.get('page'), proxy=text(config, 'proxy') or None,
-        cookies=credentials['cookies'], bili_cookie_file=credentials['bili_cookie_file'],
-        bili_sessdata=credentials.get('bili_sessdata'),
-        audio_language=request.get('audioLanguage'), audio_format=request.get('audioFormat'),
-        device=text(config, 'localDevice', 'cpu'), compute_type=text(config, 'localComputeType') or None,
-        download_timeout=number(config, 'downloadTimeout', 300),
-        asr_timeout=number(config, 'asrTimeout', 3600),
-        max_audio_mib=number(config, 'localMaxAudioMiB', 512),
-        max_duration=number(config, 'maxDuration', 14400), beam_size=5, vad_filter=True)
-    result = local_asr.transcribe(args)
-    if result.get('status') == 'ok':
-        result.update(metadata_file=str(out / 'metadata.json'), transcript_file=str(out / 'transcript.txt'),
-                      audio_uploaded=False)
-    return result
-
-
 def write_cloud_text(out, segments):
-    from local_asr import markdown_literal, stamp
+    from cloud_output import markdown_literal, stamp
     header = 'AI 云端 ASR 转写（未经校订，非平台字幕）'
     with (out / 'transcript.txt').open('x', encoding='utf-8') as txt, \
          (out / 'transcript.md').open('x', encoding='utf-8') as md, \
@@ -267,7 +230,7 @@ def write_cloud_text(out, segments):
 
 
 def write_cloud_plain(out, body):
-    from local_asr import markdown_literal
+    from cloud_output import markdown_literal
     header = 'AI 云端 ASR 转写（未经校订，非平台字幕；服务未提供时间戳）'
     (out / 'transcript.txt').write_text(header + '\n\n' + body + '\n', encoding='utf-8')
     (out / 'transcript.md').write_text('# ' + header + '\n\n' + markdown_literal(body) + '\n', encoding='utf-8')
@@ -276,7 +239,7 @@ def write_cloud_plain(out, body):
 def cloud_extract(request, config, out, reason, downloader=None, transcriber=None):
     from cloud_asr import validate_cloud_config, transcribe_cloud
     from audio_sources import download_audio
-    from local_asr import safe_source, verify_audio, validate_segments, write_json
+    from cloud_output import safe_source, verify_audio, validate_segments, write_json
     # Consent is checked before reading an explicitly configured credential file.
     validate_cloud_config(cloud_config(config, request.get('language', 'auto')))
     download_timeout = number(config, 'downloadTimeout', 300)
@@ -296,7 +259,9 @@ def cloud_extract(request, config, out, reason, downloader=None, transcriber=Non
         out.mkdir(parents=True, exist_ok=False)
         created = True
         credentials = audio_cookie_options(request, config)
-        with tempfile.TemporaryDirectory(prefix='dsh-video-study-cloud-') as directory:
+        # Never ask tempfile to choose a system/cwd fallback. This directory
+        # belongs to the new output, and cleanup never removes transcript files.
+        with tempfile.TemporaryDirectory(prefix='.audio-', dir=out) as directory:
             audio, source_data = downloader(request['target'], directory, page=request.get('page'),
                 proxy=options['proxy'], **credentials,
                 max_bytes=options['max_bytes'], max_duration=max_duration,
@@ -386,7 +351,7 @@ def cloud_extract(request, config, out, reason, downloader=None, transcriber=Non
         raise
 
 
-def dispatch(request, caption_fn=None, local_fn=None, cloud_fn=None):
+def dispatch(request, caption_fn=None, cloud_fn=None):
     if not isinstance(request, dict) or not isinstance(request.get('config', {}), dict):
         fail('invalid_input')
     config = request.get('config', {})
@@ -423,8 +388,7 @@ def dispatch(request, caption_fn=None, local_fn=None, cloud_fn=None):
                     'mode': mode, 'asr_attempted': False, 'audio_downloaded': False,
                     'content_verified': False}
         reason = code
-    fn = (local_fn or local_extract) if mode == 'local' else (cloud_fn or cloud_extract)
-    return fn(request, config, out, reason)
+    return (cloud_fn or cloud_extract)(request, config, out, reason)
 
 
 def safe_result(value, private_value=None):
@@ -485,6 +449,4 @@ def main():
 
 
 if __name__ == '__main__':
-    import multiprocessing
-    multiprocessing.freeze_support()
     raise SystemExit(main())

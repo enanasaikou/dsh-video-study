@@ -26,11 +26,11 @@ test('only a native host capability can open a dialog; unknown purpose cannot in
   }
 });
 
-test('model directory selection returns a path only, without reading model contents or saving settings', async () => {
-  const f = fixture();
-  assert.deepEqual(await f.picker('localModelDir'), { status: 'ok', cancelled: false, path: folder });
-  assert.deepEqual(f.stats, [folder]);
-  assert.equal(f.calls.length, 1);
+test('removed model picker and resolver fail before capability lookup or filesystem access', async () => {
+  const f = fixture({ getCapability() { throw new Error('removed model must not open a dialog'); } });
+  await assert.rejects(f.picker('localModelDir'), failed('invalid_input'));
+  await assert.rejects(f.picker.resolve('localModelDir', folder), failed('invalid_input'));
+  assert.deepEqual(f.stats, []); assert.equal(f.calls.length, 0);
 });
 
 test('Python folder recognizes fixed installation and venv executable names without executing them', async () => {
@@ -61,7 +61,7 @@ test('cancelled native selection or preaborted request leaves configuration unto
   assert.deepEqual(f.stats, []);
   const controller = new AbortController(); controller.abort();
   const g = fixture();
-  assert.equal((await g.picker('localModelDir', { signal: controller.signal })).cancelled, true);
+  assert.equal((await g.picker('pythonPath', { signal: controller.signal })).cancelled, true);
   assert.equal(g.calls.length, 0);
 });
 
@@ -72,17 +72,17 @@ test('timeout/abort ignores late native success and retains the gate until the n
   const pending = f.picker('pythonPath', { signal: controller.signal });
   await Promise.resolve(); controller.abort();
   assert.equal((await pending).cancelled, true);
-  await assert.rejects(f.picker('localModelDir'), failed('picker_busy'));
+  await assert.rejects(f.picker('pythonPath'), failed('picker_busy'));
   finish(folder); await Promise.resolve(); await Promise.resolve();
   assert.deepEqual(f.stats, []);
   f.picker.dispose();
-  await assert.rejects(f.picker('localModelDir'), failed('picker_unavailable'));
+  await assert.rejects(f.picker('pythonPath'), failed('picker_unavailable'));
 });
 
 test('plugin disposal aborts an outstanding dialog and discards late results', async () => {
   let signal, finish;
   const f = fixture({ getCapability: () => ({ kind: 'native', pick: s => { signal = s; return new Promise(resolve => { finish = resolve; }); } }) });
-  const pending = f.picker('localModelDir'); await Promise.resolve();
+  const pending = f.picker('pythonPath'); await Promise.resolve();
   f.picker.dispose();
   assert.equal(signal.aborted, true);
   assert.equal((await pending).cancelled, true);
@@ -94,9 +94,8 @@ test('already-chosen desktop directories resolve without a native service, openi
   const f = fixture({ getCapability() { throw new Error('must not request a native service'); } });
   assert.equal((await f.picker.resolve('pythonPath', folder)).path, join(folder, 'python.exe'));
   assert.deepEqual(f.stats, [folder, join(folder, 'python.exe')]); assert.equal(f.calls.length, 0);
-  assert.equal((await f.picker.resolve('localModelDir', folder)).path, folder);
   for (const selected of ['relative', '\\\\server\\share', folder + '\n', null])
-    await assert.rejects(f.picker.resolve('localModelDir', selected), failed('picker_failed'));
+    await assert.rejects(f.picker.resolve('pythonPath', selected), failed('picker_failed'));
   await assert.rejects(f.picker.resolve('cloudApiKeyFile', folder), failed('invalid_input'));
   const abort = new AbortController(); abort.abort(); const count = f.stats.length;
   assert.equal((await f.picker.resolve('pythonPath', folder, { signal: abort.signal })).cancelled, true);
@@ -107,9 +106,9 @@ test('already-chosen desktop directories resolve without a native service, openi
 test('invalid selections and native exceptions return fixed codes, never raw details', async () => {
   for (const selected of ['relative', '\\\\server\\share', folder + '\n', 1, { path: folder }]) {
     const f = fixture({ getCapability: () => ({ kind: 'native', pick: async () => selected }) });
-    await assert.rejects(f.picker('localModelDir'), failed('picker_failed'));
+    await assert.rejects(f.picker('pythonPath'), failed('picker_failed'));
     assert.deepEqual(f.stats, []);
   }
   const f = fixture({ getCapability: () => ({ kind: 'native', pick: async () => { throw new Error('private data'); } }) });
-  await assert.rejects(f.picker('localModelDir'), error => failed('picker_failed')(error) && !error.message.includes('private data'));
+  await assert.rejects(f.picker('pythonPath'), error => failed('picker_failed')(error) && !error.message.includes('private data'));
 });

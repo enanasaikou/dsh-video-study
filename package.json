@@ -1,7 +1,7 @@
 {
   "name": "dsh-video-study",
-  "version": "0.6.3",
-  "description": "YouTube/B站字幕与课程资料：默认仅字幕、可选云端/本机ASR，DSH设置内B站扫码登录。" ,
+  "version": "0.8.1",
+  "description": "YouTube/B站字幕与课程资料云端发行版：默认仅字幕、可选云端ASR，DSH设置内B站扫码登录；一键准备运行环境。",
   "type": "module",
   "main": "lib/index.js",
   "exports": { ".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json" },
@@ -12,7 +12,7 @@
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-settings-general"] }
   },
-  "files": ["lib", "python", "skills", "client/vendor/LICENSE.qrcode-generator", "client/vendor/README.md", "cordis.patch.yml", "LICENSE", "LICENSE-UPSTREAM", "THIRD_PARTY_NOTICES.md", "README.md"],
+  "files": ["lib", "python", "skills", "client/vendor/LICENSE.qrcode-generator", "client/vendor/README.md", "cordis.patch.yml", "LICENSE", "LICENSE-UPSTREAM", "THIRD_PARTY_NOTICES.md", "README.md", "SECURITY.md"],
   "scripts": {
     "test": "node --test",
     "build:client": "node client/build.mjs",

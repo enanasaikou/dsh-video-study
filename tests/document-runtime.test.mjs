@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os';
 import { createRuntime } from '../lib/runtime.mjs';
 
 const home = join(tmpdir(), 'document-test-home');
-const out = join(home, 'Documents', 'DSH视频学习');
-function fixture(config = {}, response) {
+const out = join(home, 'video-study', 'documents');
+function fixture(config = {}, response, dependencies = {}) {
   const calls = [];
   const spawnImpl = (command, argv, options) => {
     const child = new EventEmitter(); child.pid = 99;
@@ -28,11 +28,37 @@ function fixture(config = {}, response) {
     }));
     return child;
   };
-  const runtime = createRuntime(config, { spawnImpl, root: resolve('.'), homedirImpl: () => home,
-    accessImpl: async () => { throw Error('not installed'); }, terminateImpl: async child => child.kill() });
+  const runtime = createRuntime(config, { spawnImpl, root: resolve('.'), getWorkspace: async () => home,
+    createScratchImpl: async base => ({ path: join(base, '.fake-scratch'), dispose: async () => {} }),
+    accessImpl: async () => { throw Error('not installed'); }, terminateImpl: async child => child.kill(), ...dependencies });
   return { runtime, calls, requests: () => calls.filter(call => call.request).map(call => call.request) };
 }
 const args = { title: '公式测试', markdown: '## 正文\n\n$\\alpha/2$' };
+
+test('document default requires a real workspace while explicit directory works without a session', async () => {
+  const missing = fixture({}, undefined, { getWorkspace: async () => null });
+  assert.equal((await missing.runtime.exportDocument(args)).status, 'workspace_required');
+  assert.equal(missing.calls.length, 0);
+  const explicit = fixture({ documentOutputDir: out }, undefined, { getWorkspace: async () => null });
+  assert.equal((await explicit.runtime.exportDocument(args)).status, 'ok');
+  assert.equal(explicit.requests()[0].directory, out);
+});
+
+test('document probe and runner isolate TMP in the selected output and clean only their scratch', async () => {
+  let cleaned = 0;
+  const before = { ...process.env };
+  const f = fixture({}, undefined, { createScratchImpl: async base => {
+    assert.equal(base, out);
+    return { path: join(base, '.unique-scratch'), dispose: async () => { cleaned++; } };
+  } });
+  assert.equal((await f.runtime.exportDocument(args)).status, 'ok');
+  for (const call of f.calls) {
+    assert.equal(call.options.cwd, home);
+    for (const key of ['TMP', 'TEMP', 'TMPDIR']) assert.equal(call.options.env[key], join(out, '.unique-scratch'));
+  }
+  assert.equal(cleaned, 1);
+  assert.deepEqual({ ...process.env }, before);
+});
 
 test('export uses only private stdin and saved document settings, never cloud or login fields', async () => {
   const config = {};

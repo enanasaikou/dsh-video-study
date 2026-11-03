@@ -21,13 +21,14 @@ async function code(promise, expected) {
 }
 function fixture({ secret = SECRET, directEntry = true } = {}) {
   let currentRevision = 4;
-  const own = { mode: 'captions', defaultLanguage: 'auto', localModel: 'small', cloudApiKey: secret,
+  const own = { mode: 'captions', defaultLanguage: 'auto', cloudApiKey: secret,
     cloudEndpoint: '', cloudModel: '', cloudUploadConsent: false };
   const persisted = { ...own, registerSkill: true, biliCookieFile: 'NEVER_READ' };
   const refs = Object.fromEntries(['mode', 'defaultLanguage', 'cloudApiKey', 'cloudUploadConsent'].map(key => [key, { get: () => own[key] }]));
   const ownerFiber = directEntry ? { entry: { options: { id: 'our-instance' } } } : {};
   const otherFiber = { entry: { options: { id: 'other-instance' } } };
-  const calls = { describe: [], mutate: [], entries: 0, status: [], setup: [] };
+  const calls = { describe: [], mutate: [], entries: 0, status: [], setup: [], install: [] };
+  let installState = { status: 'idle', running: false };
   const ownerContext = { fiber: ownerFiber };
   const ctx = {
     fiber: otherFiber, // injected context is deliberately NOT the plugin owner
@@ -55,12 +56,22 @@ function fixture({ secret = SECRET, directEntry = true } = {}) {
   const runtime = {
     async status(args, execution) { calls.status.push({ args, execution }); return { status: 'ok', backend: { ready: false }, cloudApiKey: SECRET }; },
     async setup(args, execution) { calls.setup.push({ args, execution }); return { status: 'setup_command_prepared', executed: false, command: "'python' '-B' 'setup_environment.py' '--allow-downloads'", warnings: ['仅生成命令，不执行安装。'] }; },
+    async setupInstall(args, execution) {
+      calls.install.push({ kind: 'start', args, execution });
+      installState = { status: 'setup_running', running: true, state_dir: 'C:/state' };
+      return { ...installState };
+    },
+    setupInstallStatus() {
+      calls.install.push({ kind: 'status' });
+      return { ...installState };
+    },
     extract() { throw new Error('MUST NEVER EXTRACT'); },
   };
   const options = { ownerContext, hasSecret: () => !!own.cloudApiKey };
   const repository = createAsrSettingsRepository(ctx, options);
   return { ctx, ownerContext, ownerFiber, own, persisted, refs, calls, options, repository, runtime,
-    setRevision(value) { currentRevision = value; } };
+    setRevision(value) { currentRevision = value; },
+    setInstall(value) { installState = value; } };
 }
 function routes(f = fixture(), { readTimeoutMs = 5000, ...changes } = {}) {
   const handlers = new Map();
@@ -112,10 +123,10 @@ test('own fiber namespace is located without exposing any other descriptor or se
 
 test('fiber-identity fallback locates exact instance instead of first/same-plugin entry', async () => {
   const f = fixture({ directEntry: false });
-  await f.repository.save({ revision: 4, patch: { mode: 'local' } });
+  await f.repository.save({ revision: 4, patch: { mode: 'cloud' } });
   assert.equal(f.calls.mutate[0].ns, 'our-instance');
   assert.ok(f.calls.entries >= 1);
-  assert.equal(f.persisted.mode, 'local');
+  assert.equal(f.persisted.mode, 'cloud');
 });
 
 test('native mutate CAS persists the exact patch and updates existing live references', async () => {
@@ -132,7 +143,7 @@ test('native mutate CAS persists the exact patch and updates existing live refer
 
 test('secret keep emits no secret operation and does not overwrite an inherited key', async () => {
   const f = fixture();
-  const result = await f.repository.save({ revision: 4, patch: { mode: 'local' }, secret: { action: 'keep' } });
+  const result = await f.repository.save({ revision: 4, patch: { mode: 'cloud' }, secret: { action: 'keep' } });
   assert.equal(f.calls.mutate[0].ops.some(op => op.path[0] === 'cloudApiKey'), false);
   assert.equal(f.refs.cloudApiKey.get(), SECRET); assert.equal(result.secretConfigured, true); noSecrets(result);
 });
@@ -166,11 +177,16 @@ test('malformed descriptor secret getter is never read, only allowed nonsecret v
   f.ctx.settings.describe = options => {
     const rows = describe(options);
     Object.defineProperty(rows[1].value, 'cloudApiKey', { enumerable: true, get() { throw new Error(SECRET); } });
-    rows[1].value.localModel = { cloudApiKey: SECRET };
+    rows[1].value.cloudModel = { cloudApiKey: SECRET };
+    for (const field of ['localModel', 'localModelDir', 'localDevice', 'localComputeType'])
+      Object.defineProperty(rows[1].value, field, { enumerable: true, get() { throw new Error('removed field must not be read'); } });
     return rows;
   };
   const result = await f.repository.read();
-  assert.equal(result.values.localModel, 'small'); noSecrets(result);
+  assert.equal(result.values.cloudModel, '');
+  for (const field of ['localModel', 'localModelDir', 'localDevice', 'localComputeType'])
+    assert.equal(field in result.values, false);
+  noSecrets(result);
 });
 
 test('empty patch and keep are read-only but still check expected revision', async () => {
@@ -182,16 +198,16 @@ test('empty patch and keep are read-only but still check expected revision', asy
 
 test('preflight CAS conflict does not call mutate and native SettingsConflictError is mapped', async () => {
   const f = fixture();
-  await code(f.repository.save({ revision: 3, patch: { mode: 'local' } }), 'settings_conflict');
+  await code(f.repository.save({ revision: 3, patch: { mode: 'cloud' } }), 'settings_conflict');
   assert.equal(f.calls.mutate.length, 0);
   f.ctx.settings.mutate = async () => { throw new SettingsConflictError(SECRET + NEW_KEY); };
-  await code(f.repository.save({ revision: 4, patch: { mode: 'local' } }), 'settings_conflict');
+  await code(f.repository.save({ revision: 4, patch: { mode: 'cloud' } }), 'settings_conflict');
 });
 
 test('client cannot select a namespace or patch direct secret/prototype/private fields', async () => {
   const f = fixture();
   const inputs = [
-    { revision: 4, ns: 'other-instance', patch: { mode: 'local' } },
+    { revision: 4, ns: 'other-instance', patch: { mode: 'cloud' } },
     { revision: 4, patch: { ns: 'other-instance' } },
     { revision: 4, patch: { cloudApiKey: NEW_KEY } },
     { revision: 4, patch: { registerSkill: false } },
@@ -203,6 +219,17 @@ test('client cannot select a namespace or patch direct secret/prototype/private 
   ];
   for (const input of inputs) await code(f.repository.save(input), 'invalid_input');
   assert.equal(f.calls.describe.length, 0); assert.equal(f.calls.mutate.length, 0);
+});
+
+test('local backend and all removed local settings are rejected before native services', async () => {
+  for (const patch of [{ mode: 'local' }, { localModel: 'small' }, { localModelDir: 'D:/model' },
+    { localDevice: 'cpu' }, { localComputeType: 'int8' }]) {
+    const f = routes();
+    const result = await f.request('save', { revision: 4, patch });
+    assert.equal(result.response.status, 400); assert.equal(result.data.code, 'invalid_input');
+    assert.equal(f.calls.describe.length, 0); assert.equal(f.calls.mutate.length, 0);
+    noSecrets(result.data);
+  }
 });
 
 test('revision requires a nonnegative safe integer, not coercible strings/booleans', async () => {
@@ -224,9 +251,9 @@ test('secret action format and allowed ASCII bounds are strict', async () => {
 test('format/range validation is local and never requires model/provider readiness', async () => {
   const f = fixture();
   const result = await f.repository.save({ revision: 4, patch: { mode: 'captions', pythonPath: '/does-not-exist/python',
-    localModelDir: '/does-not-exist/model', stateDir: 'C:\\not-installed', outputDir: '/nonexistent/output',
-    cloudEndpoint: '', cloudModel: '', cloudApiKeyFile: '', localDevice: 'cuda', localComputeType: 'float16' } });
-  assert.equal(result.values.mode, 'captions'); assert.equal(result.values.localDevice, 'cuda');
+    stateDir: 'C:\\not-installed', outputDir: '/nonexistent/output',
+    cloudEndpoint: '', cloudModel: '', cloudApiKeyFile: '' } });
+  assert.equal(result.values.mode, 'captions'); assert.equal(result.values.pythonPath, '/does-not-exist/python');
   assert.equal(f.calls.status.length, 0); assert.equal(f.calls.setup.length, 0);
 });
 
@@ -325,7 +352,7 @@ test('missing host services or ambiguous/current-fiber mismatch fail closed', as
 test('describe/mutate/get-secret failures never echo raw host values or namespace', async () => {
   const f = fixture();
   f.ctx.settings.mutate = async () => { throw new Error('other-instance ' + SECRET); };
-  await code(f.repository.save({ revision: 4, patch: { mode: 'local' } }), 'settings_save_failed');
+  await code(f.repository.save({ revision: 4, patch: { mode: 'cloud' } }), 'settings_save_failed');
   f.ctx.settings.describe = () => { throw new Error(SECRET); };
   await code(f.repository.read(), 'settings_unavailable');
   const g = fixture();
@@ -333,15 +360,54 @@ test('describe/mutate/get-secret failures never echo raw host values or namespac
   await code(repository.read(), 'settings_unavailable');
 });
 
-test('six unique routes keep GET config buffered and explicit actions separately streaming', () => {
+test('eight unique routes keep GET config and install status buffered, install actions streaming', () => {
   const f = routes();
   assert.deepEqual([...f.handlers.keys()], ['/api/video-study/asr/config', '/api/video-study/asr/save',
-    '/api/video-study/asr/status', '/api/video-study/asr/setup', '/api/video-study/asr/pick-path', '/api/video-study/asr/resolve-path']);
+    '/api/video-study/asr/status', '/api/video-study/asr/setup', '/api/video-study/asr/setup-install',
+    '/api/video-study/asr/setup-install-status', '/api/video-study/asr/pick-path', '/api/video-study/asr/resolve-path']);
   for (const [path, route] of f.handlers) {
-    const read = path.endsWith('/config');
+    const read = path.endsWith('/config') || path.endsWith('/setup-install-status');
     assert.deepEqual(route.methods, read ? ['GET'] : ['POST']);
     assert.equal(route.requestBody, read ? 'buffered' : 'streaming');
   }
+});
+
+test('one click install starts the plugin install and fills an empty Python path from its own status', async () => {
+  const f = routes();
+  const started = await f.request('setup-install', undefined, { method: 'POST' });
+  assert.equal(started.response.status, 200); assert.equal(started.data.result.status, 'setup_running');
+  assert.deepEqual(f.calls.install[0].args, {}); assert.ok(f.calls.install[0].execution.signal);
+  const idle = await f.request('setup-install-status', undefined, { method: 'GET' });
+  assert.equal(idle.data.result.status, 'setup_running');
+  f.setInstall({ status: 'prepared', running: false, python_path: 'C:/state/venv/Scripts/python.exe',
+    state_dir: 'C:/state', dependencies: { ytDlp: true, docx: true } });
+  const prepared = await f.request('setup-install-status', undefined, { method: 'GET' });
+  assert.equal(prepared.data.result.python_path_saved, true);
+  assert.equal(prepared.data.result.config.values.pythonPath, 'C:/state/venv/Scripts/python.exe');
+  assert.equal(prepared.data.result.config.revision, 5);
+  assert.deepEqual(f.calls.mutate.at(-1).ops, [{ op: 'set', path: ['pythonPath'], value: 'C:/state/venv/Scripts/python.exe' }]);
+  assert.equal(f.own.pythonPath, 'C:/state/venv/Scripts/python.exe');
+  noSecrets(prepared.text);
+});
+
+test('install status never overwrites a Python path the user configured explicitly', async () => {
+  const f = fixture(); f.own.pythonPath = 'C:/Custom/python.exe'; const r = routes(f);
+  f.setInstall({ status: 'prepared', running: false, python_path: 'C:/state/venv/Scripts/python.exe' });
+  const result = await r.request('setup-install-status', undefined, { method: 'GET' });
+  assert.equal(result.data.result.python_path_saved, false);
+  assert.equal('config' in result.data.result, false);
+  assert.equal(f.own.pythonPath, 'C:/Custom/python.exe');
+  assert.equal(f.calls.mutate.length, 0);
+});
+
+test('install actions reject non-POST start and missing runtime capability without installing', async () => {
+  const f = routes();
+  const wrong = await f.request('setup-install-status', { revision: 4 }, { method: 'POST' });
+  assert.equal(wrong.data.code, 'invalid_input');
+  const g = fixture(); delete g.runtime.setupInstall; const r = routes(g);
+  const missing = await r.request('setup-install', undefined, { method: 'POST' });
+  assert.equal(missing.data.code, 'settings_unavailable');
+  assert.equal(g.calls.install.length, 0);
 });
 
 test('GET config is whitelisted/nonsecret and POST save persists only explicit patch with no-store', async () => {
@@ -350,14 +416,14 @@ test('GET config is whitelisted/nonsecret and POST save persists only explicit p
   assert.equal(get.response.headers.get('cache-control'), 'no-store');
   assert.equal(get.response.headers.get('access-control-allow-origin'), null);
   assert.equal(get.response.headers.get('x-content-type-options'), 'nosniff');
-  const post = await f.request('save', { revision: 4, patch: { mode: 'local' }, secret: { action: 'keep' } });
-  assert.equal(post.data.values.mode, 'local'); assert.equal(post.data.revision, 5);
+  const post = await f.request('save', { revision: 4, patch: { mode: 'cloud' }, secret: { action: 'keep' } });
+  assert.equal(post.data.values.mode, 'cloud'); assert.equal(post.data.revision, 5);
   assert.equal(f.calls.setup.length, 0); assert.equal(f.calls.status.length, 0);
 });
 
 test('HTTP CAS conflicts return 409 and fixed code without echoing exceptions', async () => {
   const f = routes();
-  const result = await f.request('save', { revision: 1, patch: { mode: 'local' } });
+  const result = await f.request('save', { revision: 1, patch: { mode: 'cloud' } });
   assert.equal(result.response.status, 409); assert.equal(result.data.code, 'settings_conflict');
   assert.equal(f.calls.mutate.length, 0);
 });
@@ -394,10 +460,10 @@ test('synthetic SDK URL with original Host and browser Origin loads, saves and c
     headers: { Host: '127.0.0.1:1180', Origin: ORIGIN, 'Sec-Fetch-Site': 'same-origin' } });
   const get = await f.request('config', undefined, custom('config'));
   assert.equal(get.response.status, 200); assert.equal(get.data.revision, 4);
-  const saved = await f.request('save', { revision: 4, patch: { mode: 'local', defaultLanguage: 'zh' },
+  const saved = await f.request('save', { revision: 4, patch: { mode: 'cloud', defaultLanguage: 'zh' },
     secret: { action: 'keep' } }, custom('save'));
   assert.equal(saved.response.status, 200); assert.equal(saved.data.revision, 5);
-  assert.equal(saved.data.values.mode, 'local'); assert.equal(f.refs.mode.get(), 'local');
+  assert.equal(saved.data.values.mode, 'cloud'); assert.equal(f.refs.mode.get(), 'cloud');
   const state = await f.request('status', {}, custom('status'));
   const commands = await f.request('setup', {}, custom('setup'));
   assert.equal(state.response.status, 200); assert.equal(commands.data.result.executed, false);
@@ -424,7 +490,7 @@ test('synthetic URL rejects external/opaque/path Origin, missing or malformed Ho
     { Host: 'evil.invalid', Origin: ORIGIN, Forwarded: 'host=127.0.0.1:1180', 'X-Forwarded-Host': '127.0.0.1:1180' }];
   for (const headers of cases) {
     const f = routes();
-    const result = await f.request('save', { revision: 4, patch: { mode: 'local' } },
+    const result = await f.request('save', { revision: 4, patch: { mode: 'cloud' } },
       { url: 'http://dsh.internal/api/video-study/asr/save', headers });
     assert.equal(result.response.status, 403); assert.equal(result.data.code, 'invalid_input');
     assert.equal(f.calls.describe.length, 0); assert.equal(f.calls.mutate.length, 0);
@@ -469,7 +535,8 @@ test('status/setup accept only empty objects and call fixed safe runtime methods
 
 test('config includes only non-secret default paths and does not probe interpreters', async () => {
   const f = fixture();
-  f.runtime.localDefaults = () => ({ stateDir: 'D:/test-default-state', platform: 'win32', cloudApiKey: SECRET });
+  f.runtime.localDefaults = () => ({ stateDir: 'D:/test-default-state', platform: 'win32', cloudApiKey: SECRET,
+    localModelDir: 'D:/removed-model', modelDir: 'D:/removed-model', localModel: 'small', localDevice: 'cpu', localComputeType: 'int8' });
   const result = await routes(f).request();
   assert.deepEqual(result.data.localDefaults, { stateDir: 'D:/test-default-state', platform: 'win32' });
   assert.equal(f.calls.status.length, 0); assert.equal(f.calls.setup.length, 0);
@@ -481,18 +548,18 @@ test('native path POST is field-whitelisted and never saves settings or starts A
     calls.push({ field, signal: execution.signal });
     return { status: 'ok', cancelled: false, path: 'D:/Python/python.exe' };
   } });
-  for (const field of ['pythonPath', 'localModelDir']) {
+  for (const field of ['pythonPath']) {
     const result = await f.request('pick-path', { field });
     assert.equal(result.response.status, 200); assert.equal(result.data.path, 'D:/Python/python.exe');
     assert.equal(calls.at(-1).signal, result.request.signal);
   }
   assert.equal(f.calls.mutate.length, 0); assert.equal(f.calls.status.length, 0); assert.equal(f.calls.setup.length, 0);
-  for (const body of [{}, { field: 'cloudApiKeyFile' }, { field: 'pythonPath', command: SECRET }, { field: 'localModelDir', ns: 'other-instance' }])
+  for (const body of [{}, { field: 'localModelDir' }, { field: 'cloudApiKeyFile' }, { field: 'pythonPath', command: SECRET }, { field: 'localModelDir', ns: 'other-instance' }])
     assert.equal((await f.request('pick-path', body)).data.code, 'invalid_input');
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
   assert.equal((await f.request('pick-path', { field: 'pythonPath' }, { method: 'GET' })).response.status, 405);
   const badOrigin = await f.request('pick-path', { field: 'pythonPath' }, { headers: { Origin: 'https://evil.test' } });
-  assert.equal(badOrigin.response.status, 403); assert.equal(calls.length, 2);
+  assert.equal(badOrigin.response.status, 403); assert.equal(calls.length, 1);
 });
 
 test('native picker capability absence and failures have static errors, cancellation has no path', async () => {
@@ -516,7 +583,7 @@ test('desktop resolve POST validates purpose and local absolute directory withou
   const result = await f.request('resolve-path', { field: 'pythonPath', path: 'D:/Python' });
   assert.equal(result.response.status, 200); assert.equal(result.data.path, 'D:/Python/python.exe');
   assert.equal(calls[0].signal, result.request.signal);
-  for (const body of [{ field: 'cloudApiKeyFile', path: 'D:/x' }, { field: 'pythonPath', path: 'relative' },
+  for (const body of [{ field: 'localModelDir', path: 'D:/x' }, { field: 'cloudApiKeyFile', path: 'D:/x' }, { field: 'pythonPath', path: 'relative' },
     { field: 'pythonPath', path: '//server/share' }, { field: 'pythonPath', path: 'D:/bad\npath' },
     { field: 'pythonPath', path: '' }, { field: 'pythonPath', path: 'D:/x', command: SECRET }])
     assert.equal((await f.request('resolve-path', body)).data.code, 'invalid_input');

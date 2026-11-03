@@ -3,12 +3,12 @@
 // Never constructs SettingsForms (which imports legacy profile settings), edits a
 // real profile, starts DSH/Python, installs, downloads, or accesses credentials.
 import { parseArgs } from 'node:util';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { Socket } from 'node:net';
 import { openAsarSdk } from '../tests/support/asar-sdk.mjs';
-import { createConfig } from '../lib/adapter.mjs';
+import { createConfig, createToolDefinitions } from '../lib/adapter.mjs';
 import { LIVE_FIELDS, configValue } from '../lib/config-values.mjs';
 import { createRuntime } from '../lib/runtime.mjs';
 import { createAsrSettingsRepository } from '../lib/asr-settings.mjs';
@@ -81,7 +81,8 @@ try {
   assertSecretFree(snapshot, 'repository_initial_secret_free');
 
   stage = 'runtime_fixture';
-  const requests = [], calls = [];
+  const requests = [], calls = [], scratches = [];
+  const fixtureWorkspace = resolve('fixture-workspace');
   const spawnImpl = (command, args, options) => {
     const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough();
     let input = ''; child.stdin.on('data', data => { input += data; });
@@ -98,12 +99,28 @@ try {
     }));
     return child;
   };
-  const dynamicConfig = new Proxy({}, { get(_target, key) { return entry.fiber.config[key]; } });
+  let configReads = 0;
+  const dynamicConfig = new Proxy({}, { get(_target, key) { configReads++; return entry.fiber.config[key]; } });
   runtime = createRuntime(dynamicConfig, { spawnImpl, accessImpl: async () => { throw new Error('fixture absent'); },
-    homedirImpl: () => resolve('fixture-home'), tmpdirImpl: () => resolve('fixture-tmp'),
+    getWorkspace: async () => fixtureWorkspace,
+    createScratchImpl: async base => {
+      const scratch = { base, path: join(base, '.fixture-scratch-' + (scratches.length + 1)), disposed: false };
+      scratches.push(scratch);
+      return { path: scratch.path, dispose: async () => { scratch.disposed = true; } };
+    },
+    homedirImpl: () => { throw new Error('home fallback forbidden'); },
+    tmpdirImpl: () => { throw new Error('global temp fallback forbidden'); },
     uuidImpl: () => 'native-settings-fixture', platform: process.platform,
     terminateImpl: async child => { child.kill(); return true; } });
-  check((await runtime.extract({ target: 'abcdefghijk' })).status === 'ok', 'runtime_initial_extract');
+  const extractTool = createToolDefinitions({}, runtime)[1];
+  check(extractTool.parameters.outputStyle?.required === true
+    && JSON.stringify(extractTool.parameters.outputStyle.enum) === JSON.stringify(['verbatim', 'concise', 'summary']), 'required_per_call_output_style_schema');
+  const beforeGateReads = configReads;
+  const gate = await runtime.extract({ target: 'abcdefghijk' });
+  check(gate.status === 'output_style_required' && gate.success === false && gate.choices.length === 3
+    && configReads === beforeGateReads && calls.length === 0 && scratches.length === 0, 'native_missing_style_before_config_and_spawn');
+  const initialResult = await runtime.extract({ outputStyle: 'verbatim', target: 'abcdefghijk' });
+  check(initialResult.status === 'ok' && initialResult.output_style === 'verbatim', 'runtime_initial_extract');
   check(requests[0].config.mode === 'captions' && !Object.hasOwn(requests[0].config, 'cloudApiKey'), 'runtime_captions_no_secret');
   const firstRevision = snapshot.revision;
   snapshot = await repository.save({ revision: snapshot.revision, patch: { mode: 'cloud',
@@ -113,8 +130,8 @@ try {
   check(entry.fiber.config.mode.get() === 'cloud' && entry.fiber.config.cloudApiKey.get() === secretB, 'native_refs_after_save');
   assertSecretFree(snapshot, 'repository_saved_secret_free');
   assertSecretFree(descriptor(), 'native_describe_after_save_secret_free');
-  const result = await runtime.extract({ target: 'abcdefghijk', forceAsr: true });
-  check(result.status === 'ok', 'same_runtime_cloud_extract');
+  const result = await runtime.extract({ outputStyle: 'concise', target: 'abcdefghijk', forceAsr: true });
+  check(result.status === 'ok' && result.output_style === 'concise' && result.output_style_label === '简要压缩', 'same_runtime_cloud_extract');
   check(requests[1].config.mode === 'cloud' && requests[1].config.cloudApiKey === secretB, 'same_runtime_reads_new_secret');
   check(requests[1].config.cloudEndpoint === 'https://asr.example.invalid/v1/audio/transcriptions'
     && requests[1].config.cloudUploadConsent === true, 'same_runtime_reads_new_endpoint_consent');
@@ -123,11 +140,11 @@ try {
 
   let before = JSON.stringify(raw), beforeEdits = edits;
   let conflict = false;
-  try { await repository.save({ revision: firstRevision, patch: { mode: 'local' }, secret: { action: 'clear' } }); }
+  try { await repository.save({ revision: firstRevision, patch: { mode: 'captions' }, secret: { action: 'clear' } }); }
   catch (error) { conflict = error.code === 'settings_conflict'; }
   check(conflict && JSON.stringify(raw) === before && edits === beforeEdits, 'repository_stale_cas_preserves_config');
   let nativeConflict = false;
-  try { await settings.mutate('video-fixture', [{ op: 'set', path: ['mode'], value: 'local' }], firstRevision); }
+  try { await settings.mutate('video-fixture', [{ op: 'set', path: ['mode'], value: 'captions' }], firstRevision); }
   catch (error) { nativeConflict = error instanceof SettingsConflictError; }
   check(nativeConflict && JSON.stringify(raw) === before, 'native_stale_cas_preserves_config');
   let rejected = false;
@@ -139,11 +156,40 @@ try {
   snapshot = await repository.save({ revision: snapshot.revision, patch: {}, secret: { action: 'clear' } });
   check(raw.cloudApiKey === '' && entry.fiber.config.cloudApiKey.get() === '' && !snapshot.secretConfigured, 'secret_clear_stores_empty');
   assertSecretFree(descriptor(), 'native_describe_after_clear_secret_free');
-  snapshot = await repository.save({ revision: snapshot.revision, patch: { mode: 'local', localModel: 'tiny',
-    localModelDir: resolve('fixture-model'), localDevice: 'cpu', localComputeType: 'int8' }, secret: { action: 'keep' } });
-  check((await runtime.extract({ target: 'abcdefghijk', forceAsr: true })).status === 'ok', 'same_runtime_local_extract');
-  check(requests[2].config.mode === 'local' && requests[2].config.localModel === 'tiny'
-    && requests[2].config.localModelDir === resolve('fixture-model') && !Object.hasOwn(requests[2].config, 'cloudApiKey'), 'same_runtime_reads_local_config');
+  before = JSON.stringify(raw); beforeEdits = edits;
+  for (const patch of [{ mode: 'local' }, { localModel: 'tiny' }, { localModelDir: resolve('fixture-model') },
+    { localDevice: 'cpu' }, { localComputeType: 'int8' }]) {
+    let rejected = false;
+    try { await repository.save({ revision: snapshot.revision, patch }); }
+    catch (error) { rejected = error.code === 'invalid_input'; }
+    check(rejected && JSON.stringify(raw) === before && edits === beforeEdits,
+      'removed_local_setting_rejected_' + Object.keys(patch)[0]);
+  }
+  snapshot = await repository.save({ revision: snapshot.revision, patch: { mode: 'captions' }, secret: { action: 'keep' } });
+  const finalResult = await runtime.extract({ outputStyle: 'summary', target: 'abcdefghijk' });
+  check(finalResult.status === 'ok' && finalResult.output_style === 'summary' && finalResult.output_style_label === '总结', 'same_runtime_returns_to_captions');
+  const callsBeforeNewChoice = calls.length;
+  check((await runtime.extract({ target: 'abcdefghijk' })).status === 'output_style_required'
+    && calls.length === callsBeforeNewChoice, 'native_previous_choice_not_reused');
+  check(requests.every(request => !Object.hasOwn(request, 'outputStyle') && !Object.hasOwn(request, 'output_style')),
+    'output_style_does_not_change_python_request');
+  check(requests[2].config.mode === 'captions' && !Object.hasOwn(requests[2].config, 'cloudApiKey'), 'captions_after_cloud_does_not_read_key');
+  for (const field of ['localModel', 'localModelDir', 'localDevice', 'localComputeType'])
+    check(!Object.hasOwn(schema.dict, field) && !Object.hasOwn(snapshot.values, field)
+      && requests.every(request => !Object.hasOwn(request.config, field)), 'removed_field_absent_' + field);
+  for (const args of [{ backend: 'local' }, { model: 'small' }, { backend: 'cloud', model: 'tiny' }]) {
+    const beforeCalls = calls.length;
+    check((await runtime.setup(args)).status === 'invalid_input' && calls.length === beforeCalls,
+      'removed_setup_argument_rejected_' + Object.keys(args).join('_'));
+  }
+  check(scratches.length === requests.length && scratches.every(scratch => scratch.disposed), 'fake_request_scratch_disposed');
+  check(calls.every(call => call.options.cwd === fixtureWorkspace), 'workspace_cwd_for_probes_and_runner');
+  for (let index = 0; index < scratches.length; index++) {
+    const scratch = scratches[index];
+    check(scratch.base === raw.outputDir, 'explicit_output_base_' + index);
+    check(calls.slice(index * 2, index * 2 + 2).every(call => ['TMP', 'TEMP', 'TMPDIR'].every(key => call.options.env[key] === scratch.path)),
+      'isolated_temp_for_probe_and_runner_' + index);
+  }
   console.log(JSON.stringify({ status: 'passed', checks, sdk: versions, volatileFields: LIVE_FIELDS.length,
     mockedRunnerRequests: requests.length, networkUsed: false, profileWritten: false,
     scope: 'Actual ASAR Schema/SettingsForms; in-memory ConfigEditor; same-runtime JSON stdin with fake spawn',

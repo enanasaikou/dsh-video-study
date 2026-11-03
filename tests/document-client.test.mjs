@@ -275,7 +275,8 @@ test('document panel clearly explains server path, reviewed body, editable formu
   const React = { createElement(type, props, ...children) { return { type, props, children }; },
     useRef() { return { current: null }; }, useState() { return [view, () => {}]; }, useEffect() {} };
   const f = await fixture({ React }), tree = f.documents.Component(), text = JSON.stringify(tree);
-  for (const phrase of ['服务端本机路径', '不是浏览器下载目录', 'Documents/DSH视频学习', 'video_study_export', '通读课程、核对公式',
+  assert.ok(!text.includes('Documents/DSH视频学习'));
+  for (const phrase of ['当前会话工作区', 'video-study/documents', '绝对目录可覆盖默认值', 'video_study_export', '通读课程、核对公式',
     '不会把原始字幕直接当作讲义', 'OMML 可编辑公式', 'LaTeX', 'warning', '不代表公式已经核对', 'python-docx',
     '插件配置的 Python 解释器与环境', 'python -m pip install python-docx', '缺少依赖就停止', '不会自动安装', '本页不会运行命令']) assert.ok(text.includes(phrase), phrase);
   const select = nodes(tree).find(node => node.type === 'select');

@@ -1,4 +1,4 @@
-"""Explicitly authorized audio-only sources for local ASR; captions are untouched.
+"""Explicitly authorized audio-only sources for cloud ASR; captions are untouched.
 Titles/part names are untrusted data. Extractor dicts, signed URLs, headers,
 proxies and cookies are never persisted. Network operations do not retry.
 """
@@ -282,13 +282,13 @@ def _classify(error):
     return 'extraction_error'
 
 
-def _youtube(url, vid, proxy, cookies, budget):
+def _youtube(url, vid, proxy, cookies, budget, directory):
     try:
         import yt_dlp
     except ImportError:
         _fail('dependency_missing')
     # The temporary copy is ours; yt-dlp may rewrite it on close, never the caller's file.
-    with tempfile.TemporaryDirectory(prefix='audio-cookie-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='.audio-cookie-', dir=directory) as temporary:
         cookie_copy = None
         if cookies is not None:
             try:
@@ -309,7 +309,9 @@ def _youtube(url, vid, proxy, cookies, budget):
                        cookiesfrombrowser=None, usenetrc=False, cachedir=False, js_runtimes={},
                        remote_components=[], retries=0, extractor_retries=0, fragment_retries=0,
                        file_access_retries=0, socket_timeout=min(30, budget.remaining()),
-                       ignoreerrors=False, ignore_no_formats_error=False, enable_file_urls=False)
+                       ignoreerrors=False, ignore_no_formats_error=False, enable_file_urls=False,
+                       paths={'home': temporary, 'temp': temporary},
+                       outtmpl=str(Path(temporary) / '%(id)s.%(ext)s'))
         with yt_dlp.YoutubeDL(options) as session:
             # Bound each request by the remaining shared budget.
             original_open = session.urlopen
@@ -516,7 +518,7 @@ def download_audio(target, directory, *, page=None, proxy=None, cookies=None,
         budget = _Budget(timeout)
         opener = build_opener(ProxyHandler({'http': proxy, 'https': proxy} if proxy else {}), NoRedirect())
         if platform == 'youtube':
-            meta = _youtube(source_url, vid, proxy, cookies, budget)
+            meta = _youtube(source_url, vid, proxy, cookies, budget, folder)
             duration = _duration(meta.get('duration'), max_duration)
             chosen = _choose(meta.get('formats') or [], platform, audio_language, audio_format)
             metadata = dict(platform=platform, id=vid, title=meta.get('title') if isinstance(meta.get('title'), str) else None,

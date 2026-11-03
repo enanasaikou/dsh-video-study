@@ -2,18 +2,20 @@
 // Development-only transport probe. SDK source stays in memory; no HTTP server,
 // sockets, real profile/credentials, QR, Python, installation or ASR is used.
 import { parseArgs } from 'node:util';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
+import { EventEmitter } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
-import { Readable, Writable } from 'node:stream';
+import { PassThrough, Readable, Writable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { Socket } from 'node:net';
 import vm from 'node:vm';
 import { openAsarSdk } from '../tests/support/asar-sdk.mjs';
 import { registerAuthSettings } from '../lib/auth-settings.mjs';
 import { registerAsrSettings } from '../lib/asr-settings.mjs';
-import { createConfig } from '../lib/adapter.mjs';
+import { createConfig, createToolDefinitions } from '../lib/adapter.mjs';
+import { createRuntime } from '../lib/runtime.mjs';
 
-let stage = 'arguments', checks = 0, sdk, controller, reportPath, result, diagnostic;
+let stage = 'arguments', checks = 0, sdk, controller, reportPath, result, diagnostic, fixtureRuntime;
 
 const check = (condition, name) => { stage = name; if (!condition) throw new Error('probe assertion'); checks++; };
 const oldConnect = Socket.prototype.connect, oldFetch = globalThis.fetch;
@@ -109,17 +111,47 @@ try {
   const auth = { status: async () => ({ ...account }), check: async () => { authChecks++; return { ...account }; },
     startQr() { throw new Error('QR not permitted in probe'); }, pollQr() { throw new Error('QR not permitted in probe'); },
     cancelQr: async () => ({ ...account }), importCookie() { throw new Error('cookies not permitted in probe'); }, logout: async () => ({ ...account }) };
-  const runtime = { async status() { statusChecks++; return { status: 'ok', network_used: false, backend: { status: 'dependency_missing' } }; },
-    async setup() { setupChecks++; return { status: 'setup_command_prepared', executed: false,
-      command: "'fixture-python' '-B' 'setup_environment.py' '--backend' 'local' '--allow-downloads'" }; } };
+  const runnerCalls = [], fixtureWorkspace = resolve('http-fixture-workspace');
+  let runtimeConfigReads = 0, runtimeWorkspaceReads = 0;
+  const dynamicConfig = new Proxy({}, { get(_target, key) { runtimeConfigReads++; return entry.fiber.config[key]; } });
+  fixtureRuntime = createRuntime(dynamicConfig, {
+    getWorkspace: async () => { runtimeWorkspaceReads++; return fixtureWorkspace; },
+    createScratchImpl: async () => { throw new Error('status and setup must not create scratch'); },
+    accessImpl: async () => { throw new Error('no managed fixture'); },
+    homedirImpl: () => resolve('http-fixture-home'),
+    tmpdirImpl: () => { throw new Error('global temp fallback forbidden'); },
+    spawnImpl(command, args, options) {
+      runnerCalls.push({ command, args, options });
+      const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough();
+      child.kill = () => { queueMicrotask(() => child.emit('close', 1)); return true; };
+      child.stdin.resume();
+      child.stdin.once('finish', () => queueMicrotask(() => {
+        child.stdout.write(JSON.stringify(args.includes('-c')
+          ? { executable: resolve('http-fixture-python.exe'), version: [3, 13] }
+          : { status: 'ok', network_used: false, runtime_ready: false }));
+        child.emit('close', 0);
+      }));
+      return child;
+    },
+  });
+  const choiceSchema = createToolDefinitions({}, fixtureRuntime)[1].parameters.outputStyle;
+  check(choiceSchema?.required === true && JSON.stringify(choiceSchema.enum) === JSON.stringify(['verbatim', 'concise', 'summary']),
+    'extract_style_required_schema_in_native_fixture');
+  const missingChoice = await fixtureRuntime.extract({ target: 'abcdefghijk' });
+  check(missingChoice.status === 'output_style_required' && missingChoice.success === false
+    && missingChoice.question === '本次转写以什么简略度输出？' && missingChoice.choices.length === 3
+    && runtimeConfigReads === 0 && runtimeWorkspaceReads === 0 && runnerCalls.length === 0,
+    'missing_style_does_not_read_native_refs_workspace_or_spawn');
+  const runtime = { async status(...args) { statusChecks++; return fixtureRuntime.status(...args); },
+    async setup(...args) { setupChecks++; return fixtureRuntime.setup(...args); } };
   registerAuthSettings(ctx, auth, { readTimeoutMs: 30 });
   registerAsrSettings(ctx, { runtime, ownerContext: ctx, hasSecret: () => !!entry.fiber.config.cloudApiKey.get(), readTimeoutMs: 30,
     resolvePath: async (field, directory) => ({ status: 'ok', cancelled: false,
       path: field === 'pythonPath' ? directory + '/python.exe' : directory }) });
   const handler = connection.createSharedFetchHandler('/api');
-  check(registered.length === 13 && new Set(registered.map(route => route.path)).size === 13, 'all_paths_registered_once');
+  check(registered.length === 15 && new Set(registered.map(route => route.path)).size === 15, 'all_paths_registered_once');
   for (const route of registered) {
-    const get = route.path.endsWith('/auth/status') || route.path.endsWith('/asr/config');
+    const get = route.path.endsWith('/auth/status') || route.path.endsWith('/asr/config') || route.path.endsWith('/asr/setup-install-status');
     check(route.methods.length === 1 && route.methods[0] === (get ? 'GET' : 'POST')
       && route.requestBody === (get ? 'buffered' : 'streaming'), 'route_method_body_mode_' + route.path.split('/').slice(-2).join('_'));
     check(handler.requestBodyMode({ method: route.methods[0], url: new URL(route.path, 'http://dsh.internal') }) === route.requestBody,
@@ -144,6 +176,16 @@ try {
   check(save.status === 200 && save.json?.values?.mode === 'cloud' && raw.mode === 'cloud', 'asr_save_post_synthetic_host_origin_success');
   check(!save.text.includes(fakeKey), 'http_save_secret_free');
 
+  const beforeRemovedSettings = JSON.stringify(raw), mutationsBeforeRemovedSettings = mutations;
+  for (const patch of [{ mode: 'local' }, { localModel: 'small' }, { localModelDir: 'D:/model' },
+    { localDevice: 'cpu' }, { localComputeType: 'int8' }]) {
+    const rejected = await exchange(handler, { path: '/api/video-study/asr/save', method: 'POST', body: {
+      revision: save.json.revision, patch } });
+    check(rejected.status === 400 && rejected.json?.code === 'invalid_input'
+      && JSON.stringify(raw) === beforeRemovedSettings && mutations === mutationsBeforeRemovedSettings,
+      'removed_local_setting_rejected_' + Object.keys(patch)[0]);
+  }
+
   stage = 'frontend_controller_bridge';
   const clientSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
   let frontendRequests = 0, clientModule;
@@ -163,10 +205,10 @@ try {
     return { createElement() {} };
   });
   controller = frontend._testing.asr.createController();
-  check(controller.snapshot().values === null && controller.update('mode', 'local') === false
+  check(controller.snapshot().values === null && controller.update('mode', 'cloud') === false
     && await controller.save() === false && frontendRequests === 0, 'frontend_before_load_stays_disabled');
   check(await controller.load() === true && controller.snapshot().values?.mode === 'cloud', 'frontend_real_bridge_load_unlocks');
-  for (const mode of ['local', 'captions', 'cloud']) {
+  for (const mode of ['captions', 'cloud']) {
     check(controller.update('mode', mode) === true && controller.snapshot().dirty, 'frontend_can_edit_' + mode);
     const saved = await controller.save();
     diagnostic = { saved, httpStatus: exchanges.at(-1)?.status, dirty: controller.snapshot().dirty,
@@ -175,10 +217,13 @@ try {
       && controller.snapshot().values.mode === mode && raw.mode === mode, 'frontend_bridge_save_' + mode);
     diagnostic = undefined;
   }
-  check(frontendRequests === 4, 'frontend_only_one_get_and_three_saves');
+  check(frontendRequests === 3, 'frontend_only_one_get_and_two_saves');
   check(!JSON.stringify(controller.snapshot()).includes(fakeKey), 'frontend_snapshot_secret_free');
   check(await controller.check() === true && statusChecks === 1, 'frontend_status_streaming_post_success');
   check(await controller.setup() === true && setupChecks === 1, 'frontend_setup_streaming_post_success');
+  check(runnerCalls.length === 3 && runnerCalls.every(call => call.options.cwd === fixtureWorkspace),
+    'native_settings_workspace_reaches_probes_and_status_without_disk_writes');
+  check(runnerCalls.every(call => !call.args.some(arg => arg.includes('http-fixture-workspace'))), 'workspace_context_not_added_to_argv');
 
   stage = 'ali_native_save_and_error_fields';
   const aliEndpoint = 'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription';
@@ -213,6 +258,13 @@ try {
     body: { field: 'cloudApiKeyFile', path: 'D:/fixture-python' } });
   check(badPath.status === 400 && badPath.json?.code === 'invalid_input', 'desktop_resolve_field_whitelist');
 
+  for (const action of ['pick-path', 'resolve-path']) {
+    const rejected = await exchange(handler, { path: '/api/video-study/asr/' + action, method: 'POST',
+      body: { field: 'localModelDir', ...(action === 'resolve-path' ? { path: 'D:/model' } : {}) } });
+    check(rejected.status === 400 && rejected.json?.code === 'invalid_input' && mutations === mutationsBeforeResolve,
+      'removed_model_' + action + '_rejected');
+  }
+
   stage = 'security_negatives';
   const protectedRoutes = [
     ['/api/video-study/auth/status', 'GET'], ['/api/video-study/asr/config', 'GET'],
@@ -232,7 +284,7 @@ try {
   }
   check(mutations === baseline.mutations && authChecks === baseline.authChecks, 'security_rejections_have_no_mutation_or_fake_api');
   const beforeRejectedWrites = JSON.stringify(raw), revision = settings.describe({ redactSecrets: true })[0].revision;
-  const stale = await exchange(handler, { path: '/api/video-study/asr/save', method: 'POST', body: { revision: 0, patch: { mode: 'local' } } });
+  const stale = await exchange(handler, { path: '/api/video-study/asr/save', method: 'POST', body: { revision: 0, patch: { mode: 'captions' } } });
   check(stale.status === 409 && JSON.stringify(raw) === beforeRejectedWrites, 'http_stale_revision_preserves_state');
   const overLimit = await exchange(handler, { path: '/api/video-study/asr/save', method: 'POST', chunks: [Buffer.alloc(32768, 32), Buffer.alloc(32769, 32)] });
   check(overLimit.status === 413 && JSON.stringify(raw) === beforeRejectedWrites, 'streaming_save_64k_chunk_cap_preserved');
@@ -241,7 +293,7 @@ try {
   const started = performance.now();
   const slow = await exchange(handler, { path: '/api/video-study/asr/save', method: 'POST', stalled: true });
   check(slow.status === 408 && performance.now() - started < 2000 && JSON.stringify(raw) === beforeRejectedWrites, 'streaming_save_slow_read_deadline_preserved');
-  const removedPost = await exchange(handler, { path: '/api/video-study/asr/config', method: 'POST', body: { revision, patch: { mode: 'local' } } });
+  const removedPost = await exchange(handler, { path: '/api/video-study/asr/config', method: 'POST', body: { revision, patch: { mode: 'captions' } } });
   check(removedPost.status === 404 && JSON.stringify(raw) === beforeRejectedWrites, 'old_post_config_not_registered');
   const invalidGet = await exchange(handler, { path: '/api/video-study/asr/save' });
   check(invalidGet.status === 404 && !invalidGet.errorType, 'wrong_method_buffered_404_not_get_typeerror');
@@ -259,7 +311,7 @@ try {
     note: 'Raw exceptions, bodies, configuration and keys are intentionally not printed.' };
   process.exitCode = 1;
 } finally {
-  controller?.dispose(); sdk?.close(); Socket.prototype.connect = oldConnect; globalThis.fetch = oldFetch;
+  controller?.dispose(); await fixtureRuntime?.dispose(); sdk?.close(); Socket.prototype.connect = oldConnect; globalThis.fetch = oldFetch;
 }
 if (reportPath) {
   try { await writeFile(reportPath, JSON.stringify(result, null, 2) + '\n', { flag: 'wx' }); }

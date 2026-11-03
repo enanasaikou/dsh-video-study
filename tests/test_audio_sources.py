@@ -156,6 +156,38 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.build.call_args.args[0].proxies, {})
         self.assertIsInstance(self.build.call_args.args[1], m.NoRedirect)
 
+    def test_task_scratch_stays_in_download_directory_without_system_temp(self):
+        with patch.object(tempfile, 'gettempdir', side_effect=AssertionError('system temp forbidden')):
+            self.run_yt()
+        options = self.seen_options[0]
+        scratch = Path(options['paths']['temp'])
+        self.assertEqual(scratch.parent, self.directory)
+        self.assertEqual(options['paths']['home'], str(scratch))
+        self.assertEqual(Path(options['outtmpl']).parent, scratch)
+        self.assertFalse(scratch.exists())
+        self.assertEqual(list(self.directory.iterdir()), [self.directory / 'audio.m4a'])
+
+    def test_temp_creation_denied_never_falls_back_or_calls_extractor(self):
+        with patch.object(tempfile, 'gettempdir', side_effect=AssertionError('system temp forbidden')), \
+             patch.object(tempfile, 'mkdtemp', side_effect=PermissionError('denied')) as create:
+            self.code('local_error', self.run_yt)
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(Path(create.call_args.args[2]), self.directory)
+        self.assertFalse(self.seen_options)
+        self.assertFalse(self.opener.requests)
+        self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_extractor_failure_and_cancellation_clean_task_scratch(self):
+        for error in (RuntimeError('fixture failure'), KeyboardInterrupt()):
+            self.extract_error = error
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(tempfile, 'gettempdir', side_effect=AssertionError('system temp forbidden')):
+                with self.assertRaises(KeyboardInterrupt if isinstance(error, KeyboardInterrupt) else m.AudioSourceError):
+                    self.run_yt()
+            scratch = Path(self.seen_options[-1]['paths']['temp'])
+            self.assertFalse(scratch.exists())
+            self.assertEqual(list(self.directory.iterdir()), [])
+
     def test_explicit_proxy_is_shared_not_environment(self):
         with patch.dict('os.environ', {'HTTPS_PROXY': 'http://evil.invalid:9999'}):
             self.run_yt(proxy='http://127.0.0.1:7897')

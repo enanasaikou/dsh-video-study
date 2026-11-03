@@ -11,20 +11,22 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urlparse
 
-MODELS = {'tiny': '约75MB', 'base': '约145MB', 'small': '约480MB',
-          'medium': '约1.5GB', 'large-v3': '约3GB'}
-DEPENDENCIES = ['yt-dlp==2026.8.19']
-OWNER_MARKER = '.dsh-video-study-venv'
-MODEL_DOWNLOAD = """
-import sys
-from huggingface_hub import snapshot_download
-snapshot_download(repo_id=sys.argv[1], local_dir=sys.argv[2], token=False,
-                  endpoint='https://huggingface.co',
-                  allow_patterns=['model.bin','config.json','tokenizer.json',
-                                  'preprocessor_config.json','vocabulary.*','tokenizer_config.json'])
-"""
+BACKENDS = ('captions', 'cloud')
+DEPENDENCIES = ['yt-dlp==2026.8.19', 'python-docx==1.2.0']
+OWNER_MARKER = '.dsh-video-study-cloud-venv'
+
+
+def step(message):
+    """Emit one progress line for the settings page.
+
+    stdout stays reserved for the single JSON result, so progress goes to
+    stderr as UTF-8 bytes with a fixed prefix the plugin recognises.
+    """
+    sys.stderr.buffer.write(b'DSH_STEP ' + message.encode('utf-8') + b'\n')
+    sys.stderr.buffer.flush()
 
 
 class SetupError(Exception):
@@ -35,17 +37,12 @@ def _is_link(path):
     return path.is_symlink() or getattr(path, 'is_junction', lambda: False)()
 
 
-def _model_complete(path, required):
-    return all((path / name).is_file() and (path / name).stat().st_size for name in required)
-
-
 def parser():
     p = argparse.ArgumentParser(description='可选环境准备；默认仅显示计划，--allow-downloads才创建和下载。')
-    p.add_argument('--backend', choices=('captions', 'cloud', 'local'), default='captions')
-    p.add_argument('--state-dir', required=True, help='新/已由本插件管理的绝对状态目录')
-    p.add_argument('--model', choices=tuple(MODELS), default='small')
+    p.add_argument('--backend', choices=BACKENDS, default='captions')
+    p.add_argument('--state-dir', required=True, help='新/已由本云端插件管理的绝对状态目录')
     p.add_argument('--proxy', help='显式无凭据HTTP代理；默认不使用环境/系统代理')
-    p.add_argument('--allow-downloads', action='store_true', help='明确同意本次隔离依赖安装及local模型下载')
+    p.add_argument('--allow-downloads', action='store_true', help='明确同意本次隔离基础依赖安装；不下载ASR模型')
     return p
 
 
@@ -64,6 +61,8 @@ def checked_proxy(raw):
 
 
 def build_plan(args):
+    if args.backend not in BACKENDS:
+        raise SetupError('云端版仅支持 captions/cloud；不支持 local 或其他后端。')
     state = Path(args.state_dir)
     if not state.is_absolute() or _is_link(state):
         raise SetupError('状态目录须为明确的绝对目录，不能是链接。')
@@ -72,19 +71,13 @@ def build_plan(args):
     if any(_is_link(parent) for parent in state.parents):
         raise SetupError('状态目录的祖先不能是链接。')
     proxy = checked_proxy(args.proxy)
-    local = args.backend == 'local'
-    requirements = DEPENDENCIES + (['faster-whisper==1.2.1'] if local else [])
     return {'backend': args.backend, 'state_dir': str(state), 'venv': str(state / 'venv'),
             'python': str(state / 'venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')),
-            'requirements': requirements, 'package_index': 'https://pypi.org/simple',
-            'model': args.model if local else None,
-            'model_dir': str(state / 'models' / args.model) if local else None,
-            'model_repository': 'Systran/faster-whisper-' + args.model if local else None,
-            'model_source': 'https://huggingface.co' if local else None, 'model_size_estimate': MODELS[args.model] if local else None,
+            'requirements': list(DEPENDENCIES), 'package_index': 'https://pypi.org/simple',
             'proxy_configured': bool(proxy), 'approved': bool(args.allow_downloads),
-            'notes': ['模型大小为估计；依赖和下载缓存额外占用磁盘。',
-                      '仅字幕/云模式不安装本地ASR依赖或模型；B站字幕仅需Python标准库。',
-                      'CPU可运行本地ASR，但速度/内存受硬件影响。',
+            'notes': ['仅部署隔离Python基础依赖，不安装本机ASR引擎或下载ASR模型。',
+                      '包含字幕提取所需yt-dlp与Word导出所需python-docx。',
+                      'B站字幕仅需Python标准库；云端协议使用标准库。',
                       '固定顶层依赖，不声称传递依赖已在所有系统验证。']}
 
 
@@ -93,8 +86,8 @@ def clean_environment(state, proxy):
     allowed = ('PATH', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'USERPROFILE',
                'HOME', 'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA', 'LANG', 'LC_ALL')
     env = {key: os.environ[key] for key in allowed if key in os.environ}
-    env.update(PYTHONIOENCODING='utf-8', PYTHONNOUSERSITE='1', NETRC=os.devnull,
-               HF_HOME=str(state / 'download-cache'), HF_HUB_DISABLE_IMPLICIT_TOKEN='1')
+    env.update(PYTHONIOENCODING='utf-8', PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1', NETRC=os.devnull,
+               TMP=str(state), TEMP=str(state), TMPDIR=str(state))
     if proxy:
         env['HTTPS_PROXY'] = env['HTTP_PROXY'] = proxy
     return env
@@ -118,6 +111,8 @@ def run_step(command, env, timeout):
 
 
 def execute(args, plan):
+    if args.backend not in BACKENDS or plan.get('backend') != args.backend:
+        raise SetupError('云端版仅支持 captions/cloud；部署计划后端必须匹配。')
     if not args.allow_downloads:
         return {'status': 'plan_only', **plan}
     if sys.version_info < (3, 10):
@@ -130,36 +125,29 @@ def execute(args, plan):
     if _is_link(venv):
         raise SetupError('拒绝修改链接环境。')
     state.mkdir(parents=True, exist_ok=True)
-    env = clean_environment(state, checked_proxy(args.proxy))
-    if not venv.exists():
-        run_step([sys.executable, '-I', '-m', 'venv', str(venv)], env, 180)
-        marker.write_text('Owned by dsh-video-study explicit setup CLI\n', encoding='utf-8')
-    python = plan['python']
-    command = [python, '-I', '-m', 'pip', '--isolated', '--disable-pip-version-check',
-               '--no-input', 'install', '--only-binary=:all:', '--no-cache-dir', '--index-url', 'https://pypi.org/simple']
-    if args.proxy:
-        command += ['--proxy', args.proxy]
-    run_step(command + plan['requirements'], env, 1800)
-    if args.backend == 'local':
-        model_dir = Path(plan['model_dir'])
-        required = ('model.bin', 'config.json', 'tokenizer.json', 'preprocessor_config.json')
-        if _is_link(model_dir):
-            raise SetupError('拒绝复用链接模型目录。')
-        if model_dir.exists():
-            if not model_dir.is_dir() or not _model_complete(model_dir, required):
-                raise SetupError('已有模型目录不完整，拒绝覆盖；请选择新的状态目录。')
-        else:
-            model_dir.parent.mkdir(parents=True, exist_ok=True)
-            run_step([python, '-I', '-c', MODEL_DOWNLOAD, plan['model_repository'], str(model_dir)], env, 7200)
-        if not _model_complete(model_dir, required):
-            raise SetupError('模型下载未产生完整文件。')
-    # Record actual resolved versions for this machine; never package this state.
-    run_step([python, '-I', '-m', 'pip', 'check'], env, 60)
-    snapshot_code = ("import importlib.metadata as m,json,sys;from pathlib import Path;"
-                     "Path(sys.argv[1]).write_text(json.dumps({d.metadata['Name']:d.version for d in m.distributions()},indent=2),encoding='utf-8')")
-    run_step([python, '-I', '-c', snapshot_code, str(state / 'installed-versions.json')], env, 60)
+    # Explicit installer scratch stays in the selected state; no system-temp fallback.
+    with tempfile.TemporaryDirectory(prefix='.setup-', dir=state) as scratch:
+        env = clean_environment(scratch, checked_proxy(args.proxy))
+        if not venv.exists():
+            step('正在创建隔离的 Python 环境…')
+            run_step([sys.executable, '-I', '-m', 'venv', str(venv)], env, 180)
+            marker.write_text('Owned by dsh-video-study-cloud explicit setup CLI\n', encoding='utf-8')
+        step('正在下载并安装依赖（yt-dlp、python-docx，可能要几分钟）…')
+        python = plan['python']
+        command = [python, '-I', '-m', 'pip', '--isolated', '--disable-pip-version-check',
+                   '--no-input', 'install', '--only-binary=:all:', '--no-cache-dir', '--index-url', 'https://pypi.org/simple']
+        if args.proxy:
+            command += ['--proxy', args.proxy]
+        run_step(command + plan['requirements'], env, 1800)
+        step('正在校验已安装的依赖…')
+        # Record actual resolved versions for this machine; never package this state.
+        run_step([python, '-I', '-m', 'pip', 'check'], env, 60)
+        snapshot_code = ("import importlib.metadata as m,json,sys;from pathlib import Path;"
+                         "Path(sys.argv[1]).write_text(json.dumps({d.metadata['Name']:d.version for d in m.distributions()},indent=2),encoding='utf-8')")
+        run_step([python, '-I', '-c', snapshot_code, str(state / 'installed-versions.json')], env, 60)
+        step('正在记录环境信息…')
     result = {'status': 'prepared_not_runtime_verified', **plan,
-              'next': '将 python 路径填入插件设置；local 模式再填模型目录，并用真实短样例验证。'}
+              'next': '设置页会把它写入仍为空的Python路径；字幕获取和云端服务仍需用户另行验证。'}
     report = state / 'last-setup.json'
     report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     return result

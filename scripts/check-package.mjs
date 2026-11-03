@@ -4,11 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { buildClient } from '../client/build.mjs';
+import { createToolDefinitions } from '../lib/adapter.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const json = filename => JSON.parse(readFileSync(join(root, filename), 'utf8'));
 const pkg = json('package.json');
 assert.equal(pkg.name, 'dsh-video-study');
-assert.equal(pkg.version, '0.6.3');
+assert.equal(pkg.version, '0.8.1');
 assert.ok(pkg.peerDependencies['@deepseek-ai/dsh-host-directory-picker']);
 assert.equal(pkg.type, 'module');
 assert.equal(pkg.main, 'lib/index.js');
@@ -51,7 +52,9 @@ assert.ok(records.some(item => item.path === 'python/qwen_asr.py'));
 assert.ok(records.some(item => item.path === 'python/volcengine_asr.py'));
 assert.ok(records.some(item => item.path === 'python/tencent_asr.py'));
 assert.ok(records.some(item => item.path === 'python/audio_prepare.py'));
-assert.ok(records.some(item => item.path === 'python/local_asr.py'));
+assert.ok(records.some(item => item.path === 'python/cloud_output.py'));
+assert.equal(records.some(item => /(?:local_asr|requirements-local)/.test(item.path)), false,
+  'Cloud distribution must not ship local ASR engines or requirements');
 assert.ok(records.some(item => item.path === 'lib/local-path-picker.mjs'));
 assert.ok(records.some(item => item.path === 'python/document_export.py'));
 assert.ok(records.some(item => item.path === 'python/requirements-document.txt'));
@@ -59,9 +62,25 @@ const skill = readFileSync(join(root, 'skills/video-study/SKILL.md'), 'utf8');
 assert.match(skill, /name: video-study/);
 assert.match(skill, /备注只保留必要的“识别字幕” → “改正字幕”/);
 assert.match(skill, /默认最终只交付一个文件/);
-assert.match(skill, /系统临时目录的本次独占子目录/);
+assert.match(skill, /当前工作区或显式任务目录内的本次独占临时子目录/);
+assert.match(skill, /ask_user_question/);
+for (const label of ['原文（完全复述）', '简要压缩', '总结']) assert.ok(skill.includes(label));
+const styleParameter = createToolDefinitions({}, {}).find(tool => tool.name === 'video_study_extract').parameters.outputStyle;
+assert.equal(styleParameter.required, true);
+assert.deepEqual(styleParameter.enum, ['verbatim', 'concise', 'summary']);
+assert.ok(records.some(item => item.path === 'lib/workspace-paths.mjs'));
 assert.match(readFileSync(join(root, 'python/requirements.txt'), 'utf8'), /yt-dlp==2026\.8\.19/);
-assert.match(readFileSync(join(root, 'python/requirements-local.txt'), 'utf8'), /faster-whisper==1\.2\.1/);
+assert.match(readFileSync(join(root, 'python/setup_environment.py'), 'utf8'), /python-docx==1\.2\.0/,'One-click install must include the Word export dependency');
+const clientBundle = readFileSync(join(root, 'lib/client.js'), 'utf8');
+assert.match(clientBundle, /一键准备运行环境/);
+assert.match(clientBundle, /setup-install-status/);
+for (const record of records.filter(item => /\.(?:py|mjs|js|txt)$/.test(item.path))) {
+  assert.doesNotMatch(readFileSync(join(root, record.path), 'utf8'), /faster[_-]whisper|ctranslate2|WhisperModel|huggingface_hub/,
+    'Local ASR inference/download code in cloud payload: ' + record.path);
+}
+const client = readFileSync(join(root, 'lib/client.js'), 'utf8');
+assert.doesNotMatch(client, /快捷填入|选择预设或自定义|本机ASR|localModelDir|presets/);
+assert.doesNotMatch(client, /服务名称、完整URL和模型均可自定义|服务只返回正文时保存无时间戳|切换目标\/协议\/凭据标识/);
 const result = { status: 'passed', name: pkg.name, version: pkg.version, runtimeFiles: records.length,
   bytes: records.reduce((sum, item) => sum + item.bytes, 0),
   noLifecycleDownloads: true, noBundledModelsOrCredentials: true, records };
