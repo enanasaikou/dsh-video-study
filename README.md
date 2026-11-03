@@ -154,7 +154,11 @@ python -m pip install -r python/requirements-document.txt
 
 ### 3. `local`：用已有环境或生成部署命令
 
-已有环境填 `mode: local`、`pythonPath`、`localModelDir`。模型要是完整的 faster-whisper/CTranslate2 目录（含 `model.bin`、`config.json`、`tokenizer.json`、`preprocessor_config.json`），不接受模型简称联网加载。
+0.6.3本机页保留简短字段提示与“选择文件夹”按钮，删除冗长的部署说明清单。Desktop优先复用宿主绑定主窗口的原生目录对话框，普通Web使用宿主后端原生通道；选择后只填草稿，仍需保存。等待、取消或错误会显示在对应字段旁。模型目录**可留空**，表示使用状态目录的 `models/<localModel>`，不表示模型已经存在或允许自动下载。Python留空时先寻找插件管理的 `venv`，再寻找系统Python 3.10+；检查环境会显示实际解释器和模型目录。初次部署推荐两项留空，先保存，再生成命令并检查后手动执行。
+
+已有环境可直接手填解释器**文件**路径，或点“选择Python文件夹”选Python安装目录/venv目录；后台仅检查固定的 `python.exe` / `Scripts/python.exe`（Windows）或 `bin/python3` / `bin/python` / `python3` / `python`，不会执行所选文件。模型选择已下载的完整 faster-whisper/CTranslate2 文件夹（含 `model.bin`、`config.json`、`tokenizer.json`、`preprocessor_config.json`），不接受模型简称联网加载。宿主原生选择器仅用于本机目录选择，不上传文件内容、不授予工作区权限，取消不改变草稿；没有原生选择能力时仍可手动输入运行DSH机器上的路径。
+
+部署命令始终准备状态目录下的隔离环境和模型，不会给手选Python安装依赖，也不会把模型下载到自定义 `localModelDir`。使用该命令准备的产物时，应恢复默认Python/模型路径；自定义路径依然优先，不会偷偷切换环境。
 
 没有环境时在同页保存本机模式后点 **生成部署命令**（也可用 `video_study_setup`）。检查后手动执行才会：
 

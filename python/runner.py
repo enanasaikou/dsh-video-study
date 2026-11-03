@@ -113,7 +113,10 @@ def status(config, mode):
         result['backend'] = {'kind': 'none', 'needs_api': False, 'needs_local_model': False}
     elif mode == 'local':
         import local_asr
-        result['backend'] = local_asr.status_report(SimpleNamespace(model_dir=local_model_dir(config)))
+        resolved_model = local_model_dir(config)
+        result['backend'] = local_asr.status_report(SimpleNamespace(model_dir=resolved_model))
+        result['backend']['resolved_model_dir'] = resolved_model
+        result['python_executable'] = sys.executable
     else:
         from cloud_asr import CloudASRError, validate_cloud_config
         try:

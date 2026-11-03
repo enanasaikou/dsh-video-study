@@ -113,9 +113,11 @@ try {
     async setup() { setupChecks++; return { status: 'setup_command_prepared', executed: false,
       command: "'fixture-python' '-B' 'setup_environment.py' '--backend' 'local' '--allow-downloads'" }; } };
   registerAuthSettings(ctx, auth, { readTimeoutMs: 30 });
-  registerAsrSettings(ctx, { runtime, ownerContext: ctx, hasSecret: () => !!entry.fiber.config.cloudApiKey.get(), readTimeoutMs: 30 });
+  registerAsrSettings(ctx, { runtime, ownerContext: ctx, hasSecret: () => !!entry.fiber.config.cloudApiKey.get(), readTimeoutMs: 30,
+    resolvePath: async (field, directory) => ({ status: 'ok', cancelled: false,
+      path: field === 'pythonPath' ? directory + '/python.exe' : directory }) });
   const handler = connection.createSharedFetchHandler('/api');
-  check(registered.length === 11 && new Set(registered.map(route => route.path)).size === 11, 'all_paths_registered_once');
+  check(registered.length === 13 && new Set(registered.map(route => route.path)).size === 13, 'all_paths_registered_once');
   for (const route of registered) {
     const get = route.path.endsWith('/auth/status') || route.path.endsWith('/asr/config');
     check(route.methods.length === 1 && route.methods[0] === (get ? 'GET' : 'POST')
@@ -200,6 +202,16 @@ try {
   controller.update('cloudEndpoint', aliEndpoint); controller.update('cloudModel', 'paraformer-v2');
   controller.update('cloudProtocol', 'dashscope_paraformer');
   check(await controller.save() === true, 'frontend_recovers_after_field_validation_without_reload');
+
+  stage = 'desktop_path_resolution';
+  const mutationsBeforeResolve = mutations;
+  const resolvedPath = await exchange(handler, { path: '/api/video-study/asr/resolve-path', method: 'POST',
+    body: { field: 'pythonPath', path: 'D:/fixture-python' } });
+  check(resolvedPath.status === 200 && resolvedPath.json?.path === 'D:/fixture-python/python.exe'
+    && mutations === mutationsBeforeResolve, 'desktop_resolve_real_bridge_without_saving');
+  const badPath = await exchange(handler, { path: '/api/video-study/asr/resolve-path', method: 'POST',
+    body: { field: 'cloudApiKeyFile', path: 'D:/fixture-python' } });
+  check(badPath.status === 400 && badPath.json?.code === 'invalid_input', 'desktop_resolve_field_whitelist');
 
   stage = 'security_negatives';
   const protectedRoutes = [

@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-study",
-  "version": "0.6.1",
+  "version": "0.6.3",
   "description": "YouTube/B站字幕与课程资料：默认仅字幕、可选云端/本机ASR，DSH设置内B站扫码登录。" ,
   "type": "module",
   "main": "lib/index.js",
@@ -24,6 +24,7 @@
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-skill": "*",
     "@deepseek-ai/dsh-credentials": "*",
+    "@deepseek-ai/dsh-host-directory-picker": "*",
     "@deepseek-ai/dsh-client-ui-settings-general": "*",
     "react": "*",
     "@deepseek-ai/schemastery": "*"
@@ -33,6 +34,7 @@
     "@deepseek-ai/dsh-tools": { "optional": true },
     "@deepseek-ai/dsh-skill": { "optional": true },
     "@deepseek-ai/dsh-credentials": { "optional": true },
+    "@deepseek-ai/dsh-host-directory-picker": { "optional": true },
     "@deepseek-ai/dsh-client-ui-settings-general": { "optional": true },
     "react": { "optional": true },
     "@deepseek-ai/schemastery": { "optional": true }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAsrSettingsRepository, registerAsrSettings, AsrSettingsError } from '../lib/asr-settings.mjs';
+import { PathPickerError } from '../lib/local-path-picker.mjs';
 
 const ORIGIN = 'http://127.0.0.1:1180';
 const SECRET = 'FAKE_OLD_KEY_NEVER_REAL';
@@ -332,10 +333,10 @@ test('describe/mutate/get-secret failures never echo raw host values or namespac
   await code(repository.read(), 'settings_unavailable');
 });
 
-test('four unique routes keep GET config buffered and all mutations separately streaming', () => {
+test('six unique routes keep GET config buffered and explicit actions separately streaming', () => {
   const f = routes();
   assert.deepEqual([...f.handlers.keys()], ['/api/video-study/asr/config', '/api/video-study/asr/save',
-    '/api/video-study/asr/status', '/api/video-study/asr/setup']);
+    '/api/video-study/asr/status', '/api/video-study/asr/setup', '/api/video-study/asr/pick-path', '/api/video-study/asr/resolve-path']);
   for (const [path, route] of f.handlers) {
     const read = path.endsWith('/config');
     assert.deepEqual(route.methods, read ? ['GET'] : ['POST']);
@@ -464,6 +465,64 @@ test('status/setup accept only empty objects and call fixed safe runtime methods
     assert.equal(result.data.code, 'invalid_input');
     assert.equal((await f.request(action, undefined, { method: 'GET' })).response.status, 405);
   }
+});
+
+test('config includes only non-secret default paths and does not probe interpreters', async () => {
+  const f = fixture();
+  f.runtime.localDefaults = () => ({ stateDir: 'D:/test-default-state', platform: 'win32', cloudApiKey: SECRET });
+  const result = await routes(f).request();
+  assert.deepEqual(result.data.localDefaults, { stateDir: 'D:/test-default-state', platform: 'win32' });
+  assert.equal(f.calls.status.length, 0); assert.equal(f.calls.setup.length, 0);
+});
+
+test('native path POST is field-whitelisted and never saves settings or starts ASR', async () => {
+  const calls = [];
+  const f = routes(fixture(), { pickPath: async (field, execution) => {
+    calls.push({ field, signal: execution.signal });
+    return { status: 'ok', cancelled: false, path: 'D:/Python/python.exe' };
+  } });
+  for (const field of ['pythonPath', 'localModelDir']) {
+    const result = await f.request('pick-path', { field });
+    assert.equal(result.response.status, 200); assert.equal(result.data.path, 'D:/Python/python.exe');
+    assert.equal(calls.at(-1).signal, result.request.signal);
+  }
+  assert.equal(f.calls.mutate.length, 0); assert.equal(f.calls.status.length, 0); assert.equal(f.calls.setup.length, 0);
+  for (const body of [{}, { field: 'cloudApiKeyFile' }, { field: 'pythonPath', command: SECRET }, { field: 'localModelDir', ns: 'other-instance' }])
+    assert.equal((await f.request('pick-path', body)).data.code, 'invalid_input');
+  assert.equal(calls.length, 2);
+  assert.equal((await f.request('pick-path', { field: 'pythonPath' }, { method: 'GET' })).response.status, 405);
+  const badOrigin = await f.request('pick-path', { field: 'pythonPath' }, { headers: { Origin: 'https://evil.test' } });
+  assert.equal(badOrigin.response.status, 403); assert.equal(calls.length, 2);
+});
+
+test('native picker capability absence and failures have static errors, cancellation has no path', async () => {
+  const f = routes();
+  assert.equal((await f.request('pick-path', { field: 'pythonPath' })).data.code, 'picker_unavailable');
+  const cancelled = routes(fixture(), { pickPath: async () => ({ status: 'ok', cancelled: true }) });
+  assert.deepEqual((await cancelled.request('pick-path', { field: 'pythonPath' })).data, { status: 'ok', cancelled: true });
+  for (const code of ['picker_busy', 'picker_failed', 'python_not_found']) {
+    const g = routes(fixture(), { pickPath: async () => { throw new PathPickerError(code); } });
+    assert.equal((await g.request('pick-path', { field: 'pythonPath' })).data.code, code);
+  }
+});
+
+test('desktop resolve POST validates purpose and local absolute directory without mutation or another picker', async () => {
+  const calls = [];
+  const f = routes(fixture(), { pickPath() { throw new Error('must not open another dialog'); },
+    resolvePath: async (field, directory, execution) => {
+      calls.push({ field, directory, signal: execution.signal });
+      return { status: 'ok', cancelled: false, path: directory + '/python.exe' };
+    } });
+  const result = await f.request('resolve-path', { field: 'pythonPath', path: 'D:/Python' });
+  assert.equal(result.response.status, 200); assert.equal(result.data.path, 'D:/Python/python.exe');
+  assert.equal(calls[0].signal, result.request.signal);
+  for (const body of [{ field: 'cloudApiKeyFile', path: 'D:/x' }, { field: 'pythonPath', path: 'relative' },
+    { field: 'pythonPath', path: '//server/share' }, { field: 'pythonPath', path: 'D:/bad\npath' },
+    { field: 'pythonPath', path: '' }, { field: 'pythonPath', path: 'D:/x', command: SECRET }])
+    assert.equal((await f.request('resolve-path', body)).data.code, 'invalid_input');
+  assert.equal((await f.request('resolve-path', { field: 'pythonPath', path: 'D:/x' }, { method: 'GET' })).response.status, 405);
+  assert.equal((await f.request('resolve-path', { field: 'pythonPath', path: 'D:/x' }, { headers: { Origin: 'https://evil.test' } })).response.status, 403);
+  assert.equal(calls.length, 1); assert.equal(f.calls.mutate.length, 0); assert.equal(f.calls.setup.length, 0); assert.equal(f.calls.status.length, 0);
 });
 
 test('runtime errors and missing settings/runtime never echo raw exception values', async () => {

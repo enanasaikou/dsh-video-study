@@ -720,6 +720,7 @@ test('registration exposes four focused tools and no API key schema input', asyn
   const ctx = { tools: { register(tool) { registered.push(tool); } },
     effect(callback) { effects.push(callback()); },
     inject(names, callback) {
+      if (names[0] === 'directoryPicker') return; // optional on headless/CLI hosts
       if (names[0] === 'connection') { callback({}); return; }
       assert.deepEqual(names, ['skills']); callback({ skills: { registerProvider(getter) { provider = getter(); } } });
     } };

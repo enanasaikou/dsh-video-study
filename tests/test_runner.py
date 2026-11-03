@@ -396,6 +396,21 @@ class RunnerTests(unittest.TestCase):
         output.detach()
         self.assertEqual(json.loads(data)['message'], '中文输出')
 
+    def test_local_status_shows_resolved_model_and_interpreter_without_touching_cloud(self):
+        class LocalOnlyConfig(dict):
+            def get(self, key, default=None):
+                if key.startswith('cloud'):
+                    raise AssertionError('cloud config must not be accessed')
+                return super().get(key, default)
+        config = LocalOnlyConfig(mode='local', stateDir=str(self.root), localModel='small')
+        import local_asr
+        with patch.object(local_asr, 'dependency_versions', return_value={}):
+            result = runner.status(config, 'local')
+        self.assertEqual(result['python_executable'], sys.executable)
+        self.assertEqual(result['backend']['resolved_model_dir'], str(self.root / 'models' / 'small'))
+        self.assertFalse(result['runtime_ready'])
+        self.assertFalse(result['network_used'])
+
     def test_status_caption_does_not_import_asr_backend(self):
         class ForbiddenConfig(dict):
             def get(self, key, default=None):
