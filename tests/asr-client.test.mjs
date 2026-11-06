@@ -272,6 +272,135 @@ test('status presents only safe offline summary and approved dependency names', 
   assert.equal(f.calls.length, 2); f.controller.dispose();
 });
 
+async function checkedSummary(raw, mode = 'captions') {
+  const f = await fixture({ values: { mode, cloudUploadConsent: true }, savedKey: OLD_KEY,
+    reply: async action => action === 'status' ? ok({ status: 'ok', result: raw }) : undefined });
+  assert.equal(await f.controller.load(), true);
+  assert.equal(await f.controller.check(), true);
+  assert.deepEqual(f.calls.map(call => call.action), ['config', 'status']);
+  assert.equal(f.calls[1].request.method, 'POST'); assert.deepEqual(f.calls[1].body, {});
+  assert.equal(f.getSavedKey(), OLD_KEY); assert.equal(f.controller.snapshot().draft.cloudUploadConsent, true);
+  return f;
+}
+
+function rejectDiagnostics(raw) {
+  for (const name of ['message', 'warnings', 'cloudApiKey']) Object.defineProperty(raw, name, {
+    get() { throw new Error('raw diagnostics and credentials must not be read'); },
+  });
+  return raw;
+}
+
+test('captions reports both missing dependencies with their own purpose and an existing backend Python', async () => {
+  const f = await checkedSummary(rejectDiagnostics({ status: 'ok', mode: 'captions', backend: rejectDiagnostics({
+    status: 'dependency_missing', python_executable: 'C:/Python/python.exe',
+    missing_dependencies: ['yt-dlp', 'python-docx', OLD_KEY, 'UNTRUSTED-DEPENDENCY', '__proto__', null, {},
+      { toString() { throw new Error('must not coerce dependency'); } }],
+  }) }));
+  const result = f.controller.snapshot().result;
+  assert.equal(result.label, '缺少依赖'); assert.equal(result.ready, false);
+  assert.deepEqual(Array.from(result.missing), ['yt-dlp', 'python-docx']);
+  assert.equal(result.python, 'C:/Python/python.exe');
+  assert.ok(result.lines.includes('找到 Python：C:/Python/python.exe'));
+  assert.ok(result.lines.includes('缺少：yt-dlp（YouTube 字幕）、python-docx（Word 导出）'));
+  assert.match(result.next, /一键准备运行环境/);
+  const rendered = await renderMode('captions', { ...f.controller.snapshot() }); const text = JSON.stringify(rendered.tree);
+  for (const hidden of ['没有找到可用的 Python', 'UNTRUSTED-DEPENDENCY', '__proto__', OLD_KEY])
+    assert.equal(text.includes(hidden), false, hidden);
+  assert.equal(text.includes('python-docx（YouTube 字幕）'), false); f.controller.dispose();
+});
+
+test('captions missing only Word export stays unready and never mislabels it as YouTube or missing Python', async () => {
+  const f = await checkedSummary(rejectDiagnostics({ status: 'ok', mode: 'captions', backend: rejectDiagnostics({
+    status: 'dependency_missing', python_executable: '/state/venv/bin/python',
+    missing_dependencies: ['python-docx', OLD_KEY, 'UNTRUSTED-DEPENDENCY', '<script>bad</script>', [], false],
+  }) }));
+  const result = f.controller.snapshot().result;
+  assert.equal(result.label, '缺少依赖'); assert.equal(result.ready, false);
+  assert.deepEqual(Array.from(result.missing), ['python-docx']);
+  assert.ok(result.lines.includes('找到 Python：/state/venv/bin/python'));
+  assert.ok(result.lines.includes('缺少：python-docx（Word 导出）'));
+  assert.match(result.next, /一键准备运行环境/);
+  const rendered = await renderMode('captions', { ...f.controller.snapshot() }); const text = JSON.stringify(rendered.tree);
+  for (const hidden of ['没有找到可用的 Python', 'yt-dlp（', 'python-docx（YouTube 字幕）',
+    'UNTRUSTED-DEPENDENCY', '<script>', OLD_KEY]) assert.equal(text.includes(hidden), false, hidden);
+  f.controller.dispose();
+});
+
+test('captions checks use top-level ok when backend status is missing or not a string', async () => {
+  for (const backend of [undefined, null, false, 42, 'untrusted', [], {},
+    { status: null }, { status: false }, { status: 0 }, { status: [] },
+    { status: { toString() { throw new Error('must not coerce status'); } } }]) {
+    const raw = rejectDiagnostics({ status: 'ok', mode: 'captions', backend });
+    const f = await checkedSummary(raw);
+    const result = f.controller.snapshot().result;
+    assert.equal(result.label, '环境可用'); assert.equal(result.ready, true); assert.equal(result.next, '');
+    assert.match(result.lines.join(' '), /离线环境检查通过/);
+    assert.match(result.lines.join(' '), /未验证 API Key、云服务连通性或实际转写/);
+    assert.equal(JSON.stringify(result).includes('可以直接提取字幕、导出 Word'), false);
+    f.controller.dispose();
+  }
+});
+
+test('cloud string backend statuses take precedence and unknown strings safely refuse readiness', async () => {
+  for (const [top, status, label, ready] of [
+    ['ok', 'dependency_missing', '缺少依赖', false], ['dependency_missing', 'ok', '环境可用', true],
+    ['ok', 'invalid_api_key', 'Key不符合安全请求头格式', false],
+    ['ok', 'unsupported_model', '该协议不支持此模型或能力；请核对服务文档，不由厂商名称决定', false],
+    ...['', 'UNTRUSTED-STATUS', '<script>bad</script>', '__proto__', 'constructor', 'toString'].map(status =>
+      ['ok', status, '尚未验证运行环境', false]),
+  ]) {
+    const f = await checkedSummary(rejectDiagnostics({ status: top,
+      backend: rejectDiagnostics({ status, missing_dependencies: ['yt-dlp', OLD_KEY] }) }), 'cloud');
+    const result = f.controller.snapshot().result;
+    assert.equal(result.label, label); assert.equal(result.ready, ready);
+    assert.equal(JSON.stringify(result).includes(OLD_KEY), false);
+    assert.equal(JSON.stringify(result).includes('UNTRUSTED-STATUS'), false);
+    assert.equal(JSON.stringify(result).includes('<script>'), false);
+    f.controller.dispose();
+  }
+});
+
+test('missing unknown and malformed top-level status values fall back without coercion or raw diagnostics', async () => {
+  for (const status of [undefined, null, false, 0, [], {}, 'UNTRUSTED-STATUS', '__proto__', 'constructor',
+    { toString() { throw new Error('must not coerce status'); } }]) {
+    const f = await checkedSummary(rejectDiagnostics({ status, backend: rejectDiagnostics({}) }));
+    const result = f.controller.snapshot().result;
+    assert.equal(result.label, '尚未验证运行环境'); assert.equal(result.ready, false);
+    assert.equal(JSON.stringify(result).includes('UNTRUSTED-STATUS'), false);
+    assert.equal(f.controller.snapshot().error, ''); f.controller.dispose();
+  }
+});
+
+test('malformed summary payloads fail closed with only a static format error', async () => {
+  for (const result of [undefined, null, false, 42, 'UNTRUSTED-RESULT', [], ['ok']]) {
+    const f = await fixture({ reply: async action => action === 'status' ? ok({ status: 'ok', result }) : undefined });
+    await f.controller.load(); assert.equal(await f.controller.check(), false);
+    assert.equal(f.controller.snapshot().result, null);
+    assert.equal(f.controller.snapshot().error, '设置服务返回格式无效，未确认完成。');
+    assert.deepEqual(f.calls.map(call => call.action), ['config', 'status']);
+    assert.equal(JSON.stringify(f.controller.snapshot()).includes('UNTRUSTED-RESULT'), false); f.controller.dispose();
+  }
+});
+
+test('successful offline checks render the verification boundary without reading diagnostic or credential getters', async () => {
+  for (const mode of ['captions', 'cloud']) {
+    const f = await checkedSummary(rejectDiagnostics({ status: 'ok',
+      python_executable: 'C:/Python/python.exe', backend: rejectDiagnostics({ status: 'ok' }) }), mode);
+    const rendered = await renderMode(mode, { ...f.controller.snapshot() });
+    const text = JSON.stringify(rendered.tree);
+    assert.match(text, /环境可用/); assert.match(text, /离线环境检查通过/);
+    assert.match(text, /未验证 API Key、云服务连通性或实际转写/);
+    assert.match(text, /C:\/Python\/python.exe/);
+    assert.equal(text.includes(OLD_KEY), false); assert.equal(text.includes(KEY), false);
+    assert.deepEqual(treeNodes(rendered.tree).find(node => node.type === 'select').children.flat()
+      .filter(node => node?.type === 'option').map(node => node.props.value), ['captions', 'cloud']);
+    for (const field of ['ffmpegPath', 'localModel', 'localModelDir']) {
+      assert.equal(field in f.asr.defaults, false); assert.equal(f.controller.update(field, '/not-added'), false);
+    }
+    f.controller.dispose();
+  }
+});
+
 test('CAS409 forces explicit reload rather than silently retrying or merging stale values', async () => {
   let conflict = true;
   const f = await fixture({ reply: async (action, method) => action === 'save' && method === 'POST' && conflict
@@ -733,6 +862,40 @@ test('one click install posts once, polls progress and applies the auto-filled P
   assert.equal(f.calls[2].request.method, 'GET');
   assert.equal(JSON.stringify(snapshot).includes(KEY), false);
   f.controller.dispose();
+});
+
+test('installation progress renders once and a new phase replaces the previous line without logs', async () => {
+  const timers = [];
+  const phases = ['正在创建隔离环境（已用 2 秒）', '正在安装字幕依赖（已用 4 秒）'];
+  let polls = 0;
+  const f = await fixture({ reply: async action => {
+    if (action === 'setup-install') return ok({ status: 'ok', result: { status: 'setup_running', progress: phases[0] } });
+    if (action === 'setup-install-status') {
+      polls++;
+      return ok({ status: 'ok', result: polls === 1 ? { status: 'setup_running', progress: phases[1] }
+        : { status: 'prepared', running: false } });
+    }
+  }, controllerOptions: {
+    setTimeout(fn, delay) { const timer = { fn, delay }; timers.push(timer); return timer; },
+    clearTimeout(timer) { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
+  } });
+  await f.controller.load(); const pending = f.controller.install(); await flush();
+  for (let index = 0; index < phases.length; index++) {
+    const state = f.controller.snapshot(); assert.equal(state.busy, true);
+    assert.equal(state.notice, phases[index]); assert.equal(state.install.progress, phases[index]);
+    const rendered = await renderMode('captions', { ...state }); const text = JSON.stringify(rendered.tree);
+    assert.equal(text.split(phases[index]).length - 1, 1);
+    assert.equal(text.includes(phases[1 - index]), false);
+    assert.equal(treeNodes(rendered.tree).filter(node => node.props?.['aria-live'] === 'polite').length, 1);
+    const due = timers.findIndex(timer => timer.delay === 2000);
+    assert.notEqual(due, -1); timers.splice(due, 1)[0].fn(); await flush();
+  }
+  assert.equal(await pending, true);
+  const rendered = await renderMode('captions', { ...f.controller.snapshot() }); const text = JSON.stringify(rendered.tree);
+  assert.equal(text.split('运行环境已就绪').length - 1, 1);
+  for (const phase of phases) assert.equal(text.includes(phase), false);
+  assert.deepEqual(f.calls.map(call => call.action), ['config', 'setup-install', 'setup-install-status', 'setup-install-status']);
+  assert.deepEqual(f.calls[1].body, {}); f.controller.dispose();
 });
 
 test('install surfaces a configured custom interpreter without pretending it prepared anything', async () => {

@@ -115,7 +115,18 @@ def status(config, mode):
               'asr_enabled': mode != 'captions', 'runtime_ready': False,
               'warnings': ['静态检查不证明平台可访问、字幕可靠或 ASR 可运行。']}
     if mode == 'captions':
-        result['backend'] = {'kind': 'none', 'needs_api': False}
+        # Top-level ok means the check completed, not that optional dependencies
+        # exist. Report actual offline readiness without importing packages.
+        try:
+            docx_version = importlib.metadata.version('python-docx')
+        except importlib.metadata.PackageNotFoundError:
+            docx_version = None
+        missing = [name for name, version in (('yt-dlp', yt_version), ('python-docx', docx_version))
+                   if version is None]
+        result['document_support'] = {'docx_dependency': docx_version}
+        result['backend'] = {'kind': 'none', 'needs_api': False,
+                             'status': 'dependency_missing' if missing else 'ok',
+                             'missing_dependencies': missing, 'python_executable': sys.executable}
     else:
         from cloud_asr import CloudASRError, validate_cloud_config
         try:

@@ -112,8 +112,8 @@ function createAsrSettings(React, platform) {
     return { stateDir: raw.stateDir, platform: raw.platform };
   }
   function summary(raw) {
-    if (!raw || typeof raw !== 'object') throw fail('invalid_response');
-    var backend = raw.backend && typeof raw.backend === 'object' ? raw.backend : raw;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw fail('invalid_response');
+    var backend = raw.backend && typeof raw.backend === 'object' && !Array.isArray(raw.backend) ? raw.backend : raw;
     var labels = { ok: '离线检查完成', dependency_missing: '缺少依赖',
       not_runtime_checked: '尚未验证运行环境', invalid_config: '配置无效',
       invalid_input: '配置无效', invalid_endpoint: 'API地址不符合所选协议', insecure_endpoint: 'API地址需要HTTPS',
@@ -124,20 +124,23 @@ function createAsrSettings(React, platform) {
       upload_consent_required: '尚未勾选音频上传授权', invalid_proxy: '代理格式无效', unsupported_proxy: '云端仅支持HTTP代理',
       proxy_loopback_conflict: '本机HTTP接口不能与代理混用', invalid_limit: '音频大小或超时设置无效',
       timeout: '检查超时', cancelled: '检查已取消' };
-    var status = Object.prototype.hasOwnProperty.call(labels, backend.status) ? backend.status : 'not_runtime_checked';
-    var known = ['yt-dlp'];
+    var code = typeof backend.status === 'string' ? backend.status : (typeof raw.status === 'string' ? raw.status : '');
+    var status = Object.prototype.hasOwnProperty.call(labels, code) ? code : 'not_runtime_checked';
+    var known = ['yt-dlp', 'python-docx'];
     var missing = Array.isArray(backend.missing_dependencies)
       ? backend.missing_dependencies.filter(function (name) { return known.indexOf(name) >= 0; }) : [];
     var python = safePath(raw.python_executable) || safePath(backend.python_executable);
     // 检查结果直接说人能看懂的话：找到什么、缺什么、下一步点哪里。
     var lines = [];
     if (status === 'ok') {
-      lines.push('可以直接提取字幕、导出 Word。');
+      lines.push('离线环境检查通过；未验证 API Key、云服务连通性或实际转写。');
       if (python) lines.push('使用的 Python：' + python);
     } else if (status === 'dependency_missing' || status === 'not_runtime_checked') {
       if (python) lines.push('找到 Python：' + python);
       else if (status === 'dependency_missing') lines.push('没有找到可用的 Python（需要 3.10 或更新版本）。');
-      if (missing.length) lines.push('缺少：' + missing.map(function (name) { return name + '（YouTube 字幕）'; }).join('、'));
+      if (missing.length) lines.push('缺少：' + missing.map(function (name) {
+        return name + (name === 'yt-dlp' ? '（YouTube 字幕）' : '（Word 导出）');
+      }).join('、'));
       else if (status === 'not_runtime_checked') lines.push('还没有实际跑过一次转写；这不影响使用。');
       else lines.push('缺少字幕提取所需的组件。');
     } else {
@@ -442,7 +445,7 @@ function createAsrSettings(React, platform) {
           ? e('span', null, ' 安装位置：', e('code', null, view.localDefaults.stateDir)) : null),
       view.dirty ? e('p', { role: 'status' }, '有未保存的修改。') : null,
       view.error ? e('p', { role: 'alert' }, view.error) : null,
-      view.notice ? e('p', { role: 'status' }, view.notice) : null,
+      view.notice && !view.install ? e('p', { role: 'status' }, view.notice) : null,
       view.install ? e('div', { role: 'status', 'aria-live': 'polite',
         style: { display: 'grid', gap: 4, minWidth: 0, overflowWrap: 'anywhere' } },
         // 只保留一行进度：新的进度覆盖旧的，不累积日志。

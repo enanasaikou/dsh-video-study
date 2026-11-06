@@ -40,7 +40,7 @@ try {
   let raw = { mode: 'captions', cloudApiKey: secretA, registerSkill: true,
     pythonPath: resolve('fixture-python.exe'), stateDir: resolve('fixture-state'), outputDir: resolve('fixture-output') };
   const entry = { id: 'fixture', options: { id: 'video-fixture', config: raw },
-    fiber: { uid: 1, state: 2, runtime: { Config }, config: Config(raw), ctx: {} } };
+    fiber: { uid: 1, state: 2, runtime: { Config }, config: Config(raw), get effectiveConfig() { return this.config; }, ctx: {} } };
   check(typeof entry.fiber.config.mode?.get === 'function', 'native_ref_get_abi');
   check(entry.fiber.config.mode.get() === 'captions', 'native_ref_initial_mode');
   check(entry.fiber.config.cloudApiKey.get() === secretA, 'native_ref_secret_value');

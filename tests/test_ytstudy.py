@@ -1,8 +1,14 @@
+import contextlib
+import io
 import json
+import socket
+import ssl
+import sys
+import types
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import ytstudy as y
 
 
@@ -115,6 +121,87 @@ class SafetyTests(unittest.TestCase):
                           ('HTTP Error 403', 'platform_restricted'), ('Proxy connection timed out', 'network_error'),
                           ('Unable to extract', 'extraction_error')]:
             self.assertEqual(y.classify_error(msg)[0], code)
+
+    def test_localized_windows_network_message_has_safe_next_step(self):
+        code, message = y.classify_error('[WinError 10054] 远程主机强迫关闭了一个现有的连接。 FAKE_SECRET')
+        self.assertEqual(code, 'network_error')
+        self.assertIn('代理', message)
+        self.assertIn('不是没有字幕', message)
+        self.assertNotIn('FAKE_SECRET', message)
+
+    def test_native_network_types_errno_and_winerror(self):
+        winerror = OSError('完全本地化 FAKE_SECRET')
+        winerror.winerror = 10054
+        for error in (ConnectionResetError('远程关闭'), TimeoutError('超时'),
+                      OSError(104, '远程关闭'), OSError(10060, '请求超时'), winerror,
+                      socket.gaierror(-2, '主机名称解析失败'), ssl.SSLError('证书请求失败')):
+            with self.subTest(kind=type(error).__name__):
+                code, message = y.classify_error('无法获取字幕', error)
+                self.assertEqual(code, 'network_error')
+                self.assertIn('代理', message)
+                self.assertNotIn('FAKE_SECRET', message)
+
+    def test_wrapped_network_errors_and_cycles(self):
+        native = ConnectionResetError('中文系统错误 FAKE_SECRET')
+        caused = RuntimeError('无法获取')
+        caused.__cause__ = native
+        contextual = RuntimeError('无法获取')
+        contextual.__context__ = native
+        reason = RuntimeError('无法获取')
+        reason.reason = native
+        ydl_error = RuntimeError('无法获取')
+        ydl_error.exc_info = (type(native), native, None)
+        transport = type('TransportError', (Exception,), {})('本地化消息')
+        for error in (caused, contextual, reason, ydl_error, transport):
+            self.assertEqual(y.classify_error(str(error), error)[0], 'network_error')
+        cycle_a, cycle_b = RuntimeError('a'), RuntimeError('b')
+        cycle_a.__cause__, cycle_b.__cause__ = cycle_b, cycle_a
+        self.assertEqual(y.classify_error('无法确认', cycle_a)[0], 'extraction_error')
+        self.assertEqual(y.classify_error('FAKE_SECRET', FileNotFoundError(2, '不存在'))[0], 'extraction_error')
+        self.assertEqual(y.classify_error('FAKE_SECRET', PermissionError(13, '无权限'))[0], 'extraction_error')
+
+    def test_network_errors_at_both_extract_stages_are_not_caption_absence(self):
+        target = 'bGRhS_f6EdM'
+        modules = {name: types.ModuleType(name) for name in ('yt_dlp', 'yt_dlp.version', 'yt_dlp.networking')}
+        modules['yt_dlp.version'].__version__ = 'fake-offline'
+        modules['yt_dlp.networking'].Request = Mock()
+        args = types.SimpleNamespace(target=target, proxy=None, cookies=None, out=str(Path.cwd() / 'never-created'),
+                                     list_languages=False, lang='en', allow_other=False, no_dedupe=False)
+        meta = {'id': target, 'subtitles': {'en': [{'ext': 'vtt', 'url': 'https://invalid.test/FAKE_SECRET'}]}}
+        for stage in ('metadata', 'subtitle'):
+            native = OSError(104, '中文系统消息 FAKE_SECRET')
+            wrapped = RuntimeError('本地化失败')
+            wrapped.__cause__ = native
+            ydl = Mock()
+            ydl.extract_info.return_value = meta
+            if stage == 'metadata':
+                ydl.extract_info.side_effect = wrapped
+            else:
+                ydl.urlopen.side_effect = wrapped
+            with self.subTest(stage=stage), patch.dict(sys.modules, modules), \
+                 patch.object(y, 'youtube_session', return_value=contextlib.nullcontext(ydl)), \
+                 patch.object(Path, 'exists', return_value=False), patch.object(Path, 'mkdir'), \
+                 patch.object(Path, 'write_bytes', side_effect=AssertionError('no download')), \
+                 patch.object(y, 'write_bundle', side_effect=AssertionError('no bundle')), \
+                 self.assertRaises(y.StudyError) as caught:
+                y.extract(args)
+            self.assertEqual(caught.exception.code, 'network_error')
+            self.assertNotIn(caught.exception.code, ('no_captions', 'language_unavailable'))
+            self.assertNotIn('FAKE_SECRET', caught.exception.message)
+
+    def test_main_network_errors_have_static_json_and_local_errors_stay_local(self):
+        wrapped = RuntimeError('FAKE_SECRET')
+        wrapped.__cause__ = ConnectionResetError('中文系统消息')
+        for error, expected in ((OSError(10054, '中文 FAKE_SECRET'), 'network_error'),
+                                (wrapped, 'network_error'), (FileNotFoundError('FAKE_SECRET'), 'local_error')):
+            stderr = io.StringIO()
+            with patch.object(y, 'extract', side_effect=error), contextlib.redirect_stderr(stderr):
+                self.assertEqual(y.main(['extract', 'bGRhS_f6EdM']), 2)
+            result = json.loads(stderr.getvalue())
+            self.assertEqual(result['code'], expected)
+            self.assertNotIn('FAKE_SECRET', stderr.getvalue())
+            if expected == 'network_error':
+                self.assertIn('代理', result['message'])
 
     def test_default_transport(self):
         opts = y.ydl_options()

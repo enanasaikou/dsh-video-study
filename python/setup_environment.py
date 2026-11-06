@@ -12,11 +12,21 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import uuid
 from urllib.parse import urlparse
 
 BACKENDS = ('captions', 'cloud')
 DEPENDENCIES = ['yt-dlp==2026.8.19', 'python-docx==1.2.0']
 OWNER_MARKER = '.dsh-video-study-cloud-venv'
+
+
+def force_utf8_stdio():
+    """The plugin decodes JSON as UTF-8, not the Windows console codepage."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+        except (AttributeError, ValueError, OSError):
+            pass
 
 
 def step(message):
@@ -34,7 +44,44 @@ class SetupError(Exception):
 
 
 def _is_link(path):
-    return path.is_symlink() or getattr(path, 'is_junction', lambda: False)()
+    if path.is_symlink() or getattr(path, 'is_junction', lambda: False)():
+        return True
+    try:
+        # Python 3.10/3.11 lack Path.is_junction; reject reparse points there too.
+        return bool(getattr(path.lstat(), 'st_file_attributes', 0) & 0x400)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def quarantine_foreign_venv(venv, marker):
+    """Rename a recognizable foreign venv; never delete or execute its contents."""
+    if _is_link(venv) or any(_is_link(parent) for parent in venv.parents):
+        raise SetupError('拒绝修改链接环境。')
+    if not venv.exists():
+        return None
+    if not venv.is_dir() or _is_link(marker):
+        raise SetupError('环境路径或所有权标记无效；拒绝修改。')
+    if marker.is_file():
+        return None
+    config = venv / 'pyvenv.cfg'
+    if _is_link(config) or not config.is_file():
+        raise SetupError('同名目录已存在且不是可识别的虚拟环境；请手动移动后重试。')
+    original = venv.stat(follow_symlinks=False)
+    identity = (original.st_dev, original.st_ino)
+    # A fresh unpredictable sibling avoids overwriting an earlier saved venv.
+    target = venv.with_name('venv.replaced-' + uuid.uuid4().hex)
+    if target.exists() or _is_link(target):
+        raise SetupError('保留旧环境的目标已存在；未修改旧环境，请重试。')
+    if _is_link(venv) or any(_is_link(parent) for parent in venv.parents):
+        raise SetupError('拒绝修改链接环境。')
+    current = venv.stat(follow_symlinks=False)
+    if (current.st_dev, current.st_ino) != identity:
+        raise SetupError('环境目录已变化；拒绝修改。')
+    venv.rename(target)
+    saved = target.stat(follow_symlinks=False)
+    if _is_link(target) or (saved.st_dev, saved.st_ino) != identity:
+        raise SetupError('环境目录已变化；已保留目录，停止安装。')
+    return target
 
 
 def parser():
@@ -120,14 +167,14 @@ def execute(args, plan):
     state = Path(plan['state_dir'])
     venv = state / 'venv'
     marker = venv / OWNER_MARKER
-    if venv.exists() and (not marker.is_file() or marker.is_symlink()):
-        raise SetupError('venv已存在但不是本插件创建的环境，拒绝修改。')
-    if _is_link(venv):
-        raise SetupError('拒绝修改链接环境。')
+    proxy = checked_proxy(args.proxy)
+    replaced = quarantine_foreign_venv(venv, marker)
     state.mkdir(parents=True, exist_ok=True)
     # Explicit installer scratch stays in the selected state; no system-temp fallback.
     with tempfile.TemporaryDirectory(prefix='.setup-', dir=state) as scratch:
-        env = clean_environment(scratch, checked_proxy(args.proxy))
+        env = clean_environment(scratch, proxy)
+        if replaced is not None:
+            step('发现旧的、不是本插件创建的环境；已改名保留为 ' + replaced.name + '，继续新建…')
         if not venv.exists():
             step('正在创建隔离的 Python 环境…')
             run_step([sys.executable, '-I', '-m', 'venv', str(venv)], env, 180)
@@ -154,6 +201,7 @@ def execute(args, plan):
 
 
 def main(argv=None):
+    force_utf8_stdio()
     args = parser().parse_args(argv)
     try:
         plan = build_plan(args)

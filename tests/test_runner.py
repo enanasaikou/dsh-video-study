@@ -413,6 +413,29 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('captions/cloud', result['message'])
         self.assertFalse(result['success'])
 
+    def test_caption_status_reports_missing_dependencies_not_false_readiness(self):
+        def missing(name):
+            raise runner.importlib.metadata.PackageNotFoundError(name)
+        with patch.object(runner.importlib.metadata, 'version', side_effect=missing):
+            result = runner.status({}, 'captions')
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(result['backend']['status'], 'dependency_missing')
+        self.assertEqual(result['backend']['missing_dependencies'], ['yt-dlp', 'python-docx'])
+        self.assertEqual(result['backend']['python_executable'], sys.executable)
+        self.assertFalse(result['network_used'])
+
+    def test_caption_status_requires_both_subtitle_and_word_dependencies(self):
+        for absent in ('yt-dlp', 'python-docx', None):
+            with self.subTest(absent=absent):
+                def version(name):
+                    if name == absent:
+                        raise runner.importlib.metadata.PackageNotFoundError(name)
+                    return 'FAKE_VERSION'
+                with patch.object(runner.importlib.metadata, 'version', side_effect=version):
+                    result = runner.status({}, 'captions')
+                self.assertEqual(result['backend']['status'], 'dependency_missing' if absent else 'ok')
+                self.assertEqual(result['backend']['missing_dependencies'], [absent] if absent else [])
+
     def test_status_caption_does_not_import_asr_backend(self):
         class ForbiddenConfig(dict):
             def get(self, key, default=None):

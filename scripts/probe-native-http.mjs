@@ -86,7 +86,7 @@ try {
   const Config = createConfig(z), fakeKey = 'FAKE_HTTP_KEY_NOT_A_REAL_CREDENTIAL';
   let raw = { mode: 'captions', cloudApiKey: fakeKey, registerSkill: true }, mutations = 0;
   const entry = { id: 'http-fixture', options: { id: 'video-http-fixture', config: raw },
-    fiber: { uid: 1, state: 2, runtime: { Config }, config: Config(raw), ctx: {} } };
+    fiber: { uid: 1, state: 2, runtime: { Config }, config: Config(raw), get effectiveConfig() { return this.config; }, ctx: {} } };
   const editor = { configuration: () => [{ entry, inherited: {}, override: raw }], entries: () => [entry],
     async edit(target, transform) {
       if (target !== entry) throw new Error('wrong fixture entry');

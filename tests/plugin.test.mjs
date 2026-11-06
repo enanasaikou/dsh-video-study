@@ -1080,6 +1080,7 @@ function installHarness(options = {}) {
       if (args.includes('-c')) {
         child.stdout.write(JSON.stringify({ executable, version: [3, 13] })); child.emit('close', 0); return;
       }
+      if (options.progress) child.stderr.write(options.progress);
       if (options.hold) await options.hold;
       const script = options.scriptResult ?? { status: 'prepared_not_runtime_verified', python: venvPython,
         state_dir: hostedState };
@@ -1123,7 +1124,7 @@ test('one click install runs the plugin setup CLI against the hosted state witho
   const f = installHarness();
   const started = await f.runtime.setupInstall({}, {});
   assert.equal(started.status, 'setup_running'); assert.equal(started.running, true);
-  assert.equal(started.progress, '正在检查本机 Python…');
+  assert.match(started.progress, /^正在检查本机 Python…（已用 \d+ 秒）$/);
   assert.equal(started.state_dir, hostedState);
   const script = f.scripts()[0];
   assert.deepEqual(script.args.slice(-5), ['--backend', 'cloud', '--state-dir', hostedState, '--allow-downloads']);
@@ -1161,6 +1162,64 @@ test('install failures stay static, keep the job inspectable and never echo thir
   const failed = await settled(second.runtime);
   assert.equal(failed.status, 'setup_failed');
   assert.match(failed.message, /准备步骤失败/);
+});
+
+test('saved managed interpreter permits repair and retries without clearing settings', async () => {
+  const f = installHarness({ config: { pythonPath: venvPython } });
+  assert.equal((await f.runtime.setupInstall({})).status, 'setup_running');
+  assert.equal((await settled(f.runtime)).status, 'prepared');
+  assert.equal((await f.runtime.setupInstall({})).status, 'setup_running');
+  assert.equal((await settled(f.runtime)).status, 'prepared');
+  assert.equal(f.scripts().length, 2);
+  assert.ok(f.calls.filter(c => c.args.includes('-c') && !c.args.some(a => a.includes('importlib')))
+    .every(c => c.command !== venvPython));
+});
+
+test('install progress is one bounded readable line with elapsed time, without raw stderr', async () => {
+  let release;
+  const hold = new Promise(done => { release = done; });
+  const f = installHarness({ hold, progress: `ignored ${KEY}\nDSH_STEP 依赖${String.fromCharCode(0xfffd, 7)} ${'中'.repeat(250)}\n` });
+  try {
+    await f.runtime.setupInstall({});
+    await new Promise(done => setImmediate(done));
+    const { progress } = f.runtime.setupInstallStatus();
+    assert.match(progress, /^依赖/);
+    assert.match(progress, /（已用 \d+ 秒）$/);
+    assert.ok(progress.length <= 200);
+    assert.doesNotMatch(progress, /[\u0000-\u001f\ufffd]/);
+    assert.equal(progress.includes(KEY), false);
+  } finally { release(); await settled(f.runtime); }
+});
+
+test('install errors strip encoding damage and controls and bound the message', async () => {
+  const f = installHarness({ exitCode: 1, scriptResult: { status: 'setup_failed',
+    message: `venv${String.fromCharCode(0xfffd, 7)}失败 ${'长'.repeat(500)}` } });
+  await f.runtime.setupInstall({});
+  const value = await settled(f.runtime);
+  assert.equal(value.status, 'setup_failed');
+  assert.match(value.message, /失败/);
+  assert.ok(value.message.length <= 400);
+  assert.doesNotMatch(value.message, /[\u0000-\u001f\ufffd]/);
+});
+
+test('install success requires zero exit and the exact managed destination', async () => {
+  for (const options of [
+    { exitCode: 1 },
+    { scriptResult: { status: 'prepared_not_runtime_verified', python: executable } },
+  ]) {
+    const f = installHarness(options);
+    await f.runtime.setupInstall({});
+    assert.equal((await settled(f.runtime)).status, 'setup_failed');
+    assert.equal(f.calls.some(c => c.args.some(a => a.includes('importlib'))), false);
+  }
+});
+
+test('install missing Word dependency is incomplete rather than a ready environment', async () => {
+  const f = installHarness({ dependencies: { ytDlp: true, docx: false } });
+  await f.runtime.setupInstall({});
+  const value = await settled(f.runtime);
+  assert.equal(value.status, 'setup_incomplete');
+  assert.match(value.message, /python-docx/);
 });
 
 test('repeated install clicks do not spawn a second installer while one is preparing', async () => {

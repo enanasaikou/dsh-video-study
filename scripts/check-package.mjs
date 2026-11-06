@@ -5,11 +5,14 @@ import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { buildClient } from '../client/build.mjs';
 import { createToolDefinitions } from '../lib/adapter.mjs';
+import { MODES } from '../lib/runtime.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const json = filename => JSON.parse(readFileSync(join(root, filename), 'utf8'));
 const pkg = json('package.json');
 assert.equal(pkg.name, 'dsh-video-study');
-assert.equal(pkg.version, '0.8.1');
+assert.equal(pkg.version, '0.8.4');
+assert.deepEqual(MODES, ['captions', 'cloud']);
+assert.match(readFileSync(join(root, 'README.md'), 'utf8'), /云端稳定版 0\.8\.4/);
 assert.ok(pkg.peerDependencies['@deepseek-ai/dsh-host-directory-picker']);
 assert.equal(pkg.type, 'module');
 assert.equal(pkg.main, 'lib/index.js');
@@ -55,6 +58,8 @@ assert.ok(records.some(item => item.path === 'python/audio_prepare.py'));
 assert.ok(records.some(item => item.path === 'python/cloud_output.py'));
 assert.equal(records.some(item => /(?:local_asr|requirements-local)/.test(item.path)), false,
   'Cloud distribution must not ship local ASR engines or requirements');
+assert.equal(records.some(item => /funasr|local_media|ffmpeg_install|ffmpeg-manifest|\.(?:exe|dll|zip)$/i.test(item.path)), false,
+  'Cloud stable backport must not acquire full-version engines, installers or binaries');
 assert.ok(records.some(item => item.path === 'lib/local-path-picker.mjs'));
 assert.ok(records.some(item => item.path === 'python/document_export.py'));
 assert.ok(records.some(item => item.path === 'python/requirements-document.txt'));

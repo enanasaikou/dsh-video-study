@@ -88,6 +88,99 @@ class SetupTests(unittest.TestCase):
             setup.execute(args, setup.build_plan(args))
         execute.assert_not_called()
 
+    def make_foreign_venv(self):
+        venv = self.state / 'venv'
+        venv.mkdir(parents=True)
+        (venv / 'pyvenv.cfg').write_text('home = fake-python\n', encoding='utf-8')
+        (venv / 'keep.txt').write_text('旧环境完整保留', encoding='utf-8')
+        return venv
+
+    def fake_create_venv(self, command, environment, timeout):
+        if command[1:4] == ['-I', '-m', 'venv']:
+            (self.state / 'venv').mkdir()
+
+    def test_foreign_venv_is_preserved_and_fresh_environment_is_created(self):
+        old = self.make_foreign_venv()
+        (old / '.dsh-video-study-venv').write_text('foreign owner', encoding='utf-8')
+        args = self.args('--allow-downloads')
+        with patch.object(setup, 'run_step', side_effect=self.fake_create_venv) as run, \
+             patch.object(setup, 'step') as progress:
+            result = setup.execute(args, setup.build_plan(args))
+        backups = list(self.state.glob('venv.replaced-*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / 'keep.txt').read_text(encoding='utf-8'), '旧环境完整保留')
+        self.assertTrue((backups[0] / 'pyvenv.cfg').is_file())
+        self.assertTrue((backups[0] / '.dsh-video-study-venv').is_file())
+        self.assertFalse((backups[0] / setup.OWNER_MARKER).exists())
+        self.assertTrue((old / setup.OWNER_MARKER).is_file())
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual(result['status'], 'prepared_not_runtime_verified')
+        self.assertTrue(any('改名保留' in call.args[0] for call in progress.call_args_list))
+        self.assertFalse(any(str(backups[0]) in ' '.join(call.args[0]) for call in run.call_args_list))
+
+    def test_foreign_venv_plan_only_does_not_move_or_write(self):
+        venv = self.make_foreign_venv()
+        args = self.args()
+        with patch.object(setup, 'run_step') as run, \
+             patch.object(Path, 'rename', side_effect=AssertionError('plan must not rename')), \
+             patch.object(Path, 'write_text', side_effect=AssertionError('plan must not write')), \
+             patch.object(Path, 'mkdir', side_effect=AssertionError('plan must not mkdir')):
+            result = setup.execute(args, setup.build_plan(args))
+        run.assert_not_called()
+        self.assertEqual(result['status'], 'plan_only')
+        self.assertEqual((venv / 'keep.txt').read_text(encoding='utf-8'), '旧环境完整保留')
+        self.assertFalse(list(self.state.glob('venv.replaced-*')))
+
+    def test_failed_fresh_install_keeps_foreign_backup(self):
+        self.make_foreign_venv()
+        args = self.args('--allow-downloads')
+        with patch.object(setup, 'run_step', side_effect=setup.SetupError('fake failure')), \
+             patch.object(setup, 'step'), self.assertRaises(setup.SetupError):
+            setup.execute(args, setup.build_plan(args))
+        backups = list(self.state.glob('venv.replaced-*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / 'keep.txt').read_text(encoding='utf-8'), '旧环境完整保留')
+        self.assertFalse(list(self.state.glob('.setup-*')))
+        with patch.object(setup, 'run_step', side_effect=self.fake_create_venv), patch.object(setup, 'step'):
+            setup.execute(args, setup.build_plan(args))
+        self.assertEqual(list(self.state.glob('venv.replaced-*')), backups)
+
+    def test_foreign_venv_rename_failure_keeps_original(self):
+        venv = self.make_foreign_venv()
+        args = self.args('--allow-downloads')
+        with patch.object(Path, 'rename', side_effect=OSError('fake rename failure')), \
+             patch.object(setup, 'run_step') as run, self.assertRaises(OSError):
+            setup.execute(args, setup.build_plan(args))
+        run.assert_not_called()
+        self.assertEqual((venv / 'keep.txt').read_text(encoding='utf-8'), '旧环境完整保留')
+        self.assertFalse(list(self.state.glob('venv.replaced-*')))
+
+    def test_foreign_venv_does_not_replace_existing_backup(self):
+        venv = self.make_foreign_venv()
+        previous = self.state / ('venv.replaced-' + 'a' * 32)
+        previous.mkdir()
+        (previous / 'keep.txt').write_text('prior backup', encoding='utf-8')
+        token = Mock(hex='a' * 32)
+        args = self.args('--allow-downloads')
+        with patch.object(setup.uuid, 'uuid4', return_value=token), \
+             patch.object(setup, 'run_step') as run, self.assertRaises(setup.SetupError):
+            setup.execute(args, setup.build_plan(args))
+        run.assert_not_called()
+        self.assertTrue((venv / 'pyvenv.cfg').is_file())
+        self.assertEqual((previous / 'keep.txt').read_text(encoding='utf-8'), 'prior backup')
+
+    def test_linked_foreign_environment_marker_config_and_ancestor_are_rejected(self):
+        venv = self.make_foreign_venv()
+        args = self.args('--allow-downloads')
+        for linked in (venv, venv / setup.OWNER_MARKER, venv / 'pyvenv.cfg', self.state):
+            with self.subTest(linked=linked), \
+                 patch.object(setup, '_is_link', side_effect=lambda path: path == linked), \
+                 patch.object(setup, 'run_step') as run, self.assertRaises(setup.SetupError):
+                setup.execute(args, {'backend': args.backend, 'state_dir': str(self.state)})
+            run.assert_not_called()
+            self.assertFalse(list(self.state.glob('venv.replaced-*')))
+        self.assertTrue((venv / 'keep.txt').is_file())
+
     def test_original_plugin_venv_marker_is_not_owned_by_cloud_plugin(self):
         venv = self.state / 'venv'
         venv.mkdir(parents=True)
@@ -164,6 +257,61 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn('huggingface', commands)
         self.assertNotIn('faster-whisper', commands)
         self.assertNotIn('snapshot_download', commands)
+
+
+class StdioTests(unittest.TestCase):
+    def test_main_plan_json_is_utf8_even_with_legacy_console_encoding(self):
+        stdout = io.TextIOWrapper(io.BytesIO(), encoding='gbk')
+        stderr = io.TextIOWrapper(io.BytesIO(), encoding='gbk')
+        self.addCleanup(stdout.close)
+        self.addCleanup(stderr.close)
+        state = Path.cwd() / '仅计划不创建的中文状态'
+        with patch.object(setup.sys, 'stdout', stdout), patch.object(setup.sys, 'stderr', stderr), \
+             patch.object(Path, 'mkdir', side_effect=AssertionError('plan must not write')):
+            code = setup.main(['--state-dir', str(state)])
+            stdout.flush()
+            setup.step('中文进度')
+        self.assertEqual(code, 0)
+        import json
+        result = json.loads(stdout.buffer.getvalue().decode('utf-8'))
+        self.assertEqual(result['status'], 'plan_only')
+        self.assertEqual(result['state_dir'], str(state))
+        self.assertIn('中文进度', stderr.buffer.getvalue().decode('utf-8'))
+        self.assertEqual(stdout.encoding, 'utf-8')
+        self.assertEqual(stderr.encoding, 'utf-8')
+
+    def test_main_failure_json_is_utf8(self):
+        stdout = io.TextIOWrapper(io.BytesIO(), encoding='ascii')
+        stderr = io.TextIOWrapper(io.BytesIO(), encoding='ascii')
+        self.addCleanup(stdout.close)
+        self.addCleanup(stderr.close)
+        with patch.object(setup.sys, 'stdout', stdout), patch.object(setup.sys, 'stderr', stderr), \
+             patch.object(setup, 'build_plan', side_effect=setup.SetupError('中文错误未乱码')):
+            code = setup.main(['--state-dir', str(Path.cwd())])
+            stdout.flush()
+        self.assertEqual(code, 1)
+        import json
+        self.assertEqual(json.loads(stdout.buffer.getvalue().decode('utf-8'))['message'], '中文错误未乱码')
+
+    def test_reparse_points_are_rejected_without_path_is_junction(self):
+        path = Mock(spec=['is_symlink', 'lstat'])
+        path.is_symlink.return_value = False
+        path.lstat.return_value.st_file_attributes = 0x400
+        self.assertTrue(setup._is_link(path))
+        path.lstat.return_value.st_file_attributes = 0
+        self.assertFalse(setup._is_link(path))
+        path.lstat.side_effect = FileNotFoundError
+        self.assertFalse(setup._is_link(path))
+
+    def test_utf8_configuration_tolerates_streams_without_reconfigure(self):
+        with patch.object(setup.sys, 'stdout', io.StringIO()), \
+             patch.object(setup.sys, 'stderr', io.StringIO()):
+            setup.force_utf8_stdio()
+        for error in (ValueError, OSError):
+            stream = Mock()
+            stream.reconfigure.side_effect = error
+            with patch.object(setup.sys, 'stdout', stream), patch.object(setup.sys, 'stderr', stream):
+                setup.force_utf8_stdio()
 
 
 if __name__ == '__main__':

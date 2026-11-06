@@ -8,6 +8,8 @@ import html
 import json
 from pathlib import Path
 import re
+import socket
+import ssl
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -176,16 +178,47 @@ def choose_track(tracks, preferences, allow_other=False):
     raise StudyError('language_unavailable', '没有匹配优先语言的字幕；用 --list-languages 查看，或显式加 --allow-other。')
 
 
-def classify_error(message):
-    lower = message.lower()
+NETWORK_ERRNOS = frozenset({51, 10050, 10051, 10052, 10053, 10054, 10060,
+                            10061, 10064, 10065, 101, 102, 103, 104, 110, 111, 113})
+NETWORK_MESSAGE = ('网络请求被中断或超时（例如连接被重置），不是没有字幕；'
+                   '若在国内访问 YouTube，请在设置里填写可用代理后重试。')
+
+
+def _looks_like_network_error(exc):
+    """Inspect localized OS/transport errors without returning private messages."""
+    pending, seen = [exc], set()
+    while pending and len(seen) < 32:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (ConnectionError, TimeoutError, socket.gaierror,
+                                socket.herror, ssl.SSLError)):
+            return True
+        if any(isinstance(getattr(current, name, None), int)
+               and getattr(current, name) in NETWORK_ERRNOS for name in ('errno', 'winerror')):
+            return True
+        if any(word in type(current).__name__ for word in ('Transport', 'Connection', 'Timeout', 'Proxy', 'SSL')):
+            return True
+        pending.extend(getattr(current, name, None) for name in ('__cause__', '__context__', 'reason'))
+        info = getattr(current, 'exc_info', None)
+        if isinstance(info, tuple) and len(info) == 3:
+            pending.append(info[1])
+    return False
+
+
+def classify_error(message, exc=None):
+    if _looks_like_network_error(exc):
+        return 'network_error', NETWORK_MESSAGE
+    lower = str(message).lower()
     if any(s in lower for s in ('429', 'too many requests', 'rate limit')):
         return 'rate_limited', 'YouTube 请求被限流；请稍后重试。'
     if any(s in lower for s in ('sign in', 'login', 'log in', 'cookies', 'confirm your age', 'private video')):
         return 'login_required', '平台要求登录/验证或视频私有；Cookie 须显式提供导出文件。'
     if any(s in lower for s in ('401', '403', 'forbidden', 'bot', 'po token', 'challenge')):
         return 'platform_restricted', 'YouTube 拒绝访问或要求平台验证；不是无字幕。'
-    if any(s in lower for s in ('timed out', 'timeout', 'connection', 'proxy', 'resolve', 'ssl', 'certificate', '407', 'network', '502', '503')):
-        return 'network_error', '网络、代理或 TLS 请求失败；不是无字幕。'
+    if any(s in lower for s in ('timed out', 'timeout', 'connection', 'proxy', 'resolve', 'ssl', 'certificate', '407', 'network', '502', '503', '10054', '10060')):
+        return 'network_error', NETWORK_MESSAGE
     return 'extraction_error', '提取失败，原因未确认；不是已确认无字幕。'
 
 
@@ -284,7 +317,7 @@ def extract(args):
         try:
             meta = ydl.extract_info(url, download=False)
         except Exception as e:
-            code, message = classify_error(str(e))
+            code, message = classify_error(str(e), e)
             raise StudyError(code, message)
         if not isinstance(meta, dict) or meta.get('id') != vid:
             raise StudyError('extraction_error', '元数据为空或视频 ID 不匹配；不视为无字幕。')
@@ -331,7 +364,7 @@ def extract(args):
         except StudyError:
             raise
         except Exception as e:
-            code, message = classify_error(str(e))
+            code, message = classify_error(str(e), e)
             raise StudyError(code, message)
         try:
             cues = parse_subtitles(data.decode('utf-8-sig'))
@@ -390,10 +423,14 @@ def main(argv=None):
         print(json.dumps({'status': 'error', 'code': e.code, 'message': e.message}, ensure_ascii=False), file=sys.stderr)
         return 2
     except (OSError, ValueError, KeyError) as e:
-        print(json.dumps({'status': 'error', 'code': 'local_error', 'message': '本地文件、Cookie 格式或参数处理失败。', 'exception_type': type(e).__name__}, ensure_ascii=False), file=sys.stderr)
+        if isinstance(e, OSError) and _looks_like_network_error(e):
+            code, message = classify_error(str(e), e)
+        else:
+            code, message = 'local_error', '本地文件、Cookie 格式或参数处理失败。'
+        print(json.dumps({'status': 'error', 'code': code, 'message': message, 'exception_type': type(e).__name__}, ensure_ascii=False), file=sys.stderr)
         return 2
     except Exception as e:
-        code, message = classify_error(str(e))
+        code, message = classify_error(str(e), e)
         print(json.dumps({'status': 'error', 'code': code, 'message': message, 'exception_type': type(e).__name__}, ensure_ascii=False), file=sys.stderr)
         return 2
 
