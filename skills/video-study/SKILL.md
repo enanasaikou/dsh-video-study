@@ -1,13 +1,13 @@
 ---
 name: video-study
-description: 提取 YouTube/B站字幕并按本次确认的原文/简要压缩/总结整理课程；未选先问，默认只用现有字幕，按配置可选云端 ASR，环境由用户点一下“一键准备运行环境”自动安装，或自行执行生成的部署命令。
+description: 提取 YouTube/B站字幕并按本次确认的原文/简要压缩/总结整理课程；未选先问，默认只用现有字幕，按配置可选云端 ASR，由用户点击“一键准备/修复运行环境”：Windows 使用插件私有解释器，其它系统使用已有 Python 创建 venv；也可自行检查并执行部署命令。
 user-invocable: true
 disable-model-invocation: false
 ---
 
 # 视频字幕与课程译写
 
-本技能随dsh-video-study插件分发，用同包工具。后端由用户在 **DSH设置→视频学习→字幕与ASR** 里选择并保存，下一次调用生效；不要在对话参数里改模式、密钥或上传授权。页面也可检查环境、一键准备运行环境（由用户点击，会自动创建插件独占的venv并安装依赖），或生成手动部署命令；助手自己不安装、不改配置、不开始ASR。
+本技能随dsh-video-study插件分发，用同包工具。后端由用户在 **DSH设置→视频学习→字幕与ASR** 里选择并保存，下一次调用生效；不要在对话参数里改模式、密钥或上传授权。页面也可检查环境、一键准备/修复运行环境（只由用户点击：Windows 下载固定哈希的官方 CPython 与依赖至插件私有版本目录，不需要系统 Python；其它系统使用已有 Python 创建插件独占 venv），或生成需要本机 Python 的高级手动部署命令；助手自己不安装、不改配置、不开始ASR。
 
 ## 两种模式（云端发行版）
 - `captions`（默认）：只用现有字幕，不下载音轨、不跑 ASR、不读密钥和模型；没有可用源语言字幕就停止说明。
@@ -29,7 +29,7 @@ disable-model-invocation: false
 ## 步骤
 1. 先按上述规则确认本次档位；未选先问，取消就停止，不从历史任务继承选择。
 2. `video_study_status` 离线检查模式和 Python/依赖/静态配置；`runtime_ready=false` 表示还没做实跑验证。
-3. 缺依赖时先请用户到 **DSH设置→视频学习** 点“一键准备运行环境”（插件会自行创建venv、装yt-dlp与python-docx，并把解释器写入仍为空的Python路径）；也可用 `video_study_setup` 生成命令供离线/代理场景手动执行，它不安装、不改配置。不要自行安装依赖或搭环境。仅字幕/云端不需要本地模型或 GPU；YouTube 仍要 yt-dlp；所有模式要 Python 3.10+。
+3. 缺依赖时先请用户到 **DSH设置→视频学习** 点“一键准备/修复运行环境”。Windows x64/arm64 将固定版本官方 CPython 与 yt-dlp/python-docx 等锁定依赖放入插件私有版本目录，不用系统 Python、pip 或 venv；Python 路径留空时自动选择已激活环境，不回填版本绝对路径，旧托管路径可兼容。其它系统仍需本机 Python 3.10+ 创建 venv。失败保留旧环境，请用户检查网络后主动重试。也可用 `video_study_setup` 生成需要已有 Python 的高级手动部署命令，它不安装、不改配置。不要自行安装依赖或搭环境。仅字幕/云端不需要本地模型或 GPU；YouTube 仍要 yt-dlp；不自动安装 ffmpeg。
 4. `video_study_extract(target, outputStyle, language, ...)`，传入本次已确认档位。B站链接要保留分 P 参数，不要默认 P1。已知讲英语用 `language=en`，中文用 `zh`，未知用 `auto`。
 5. 先读现有字幕，再核对分 P/CID、标题、语言、时长、首末时间和覆盖范围。YouTube 自动翻译轨不能当源语言字幕。平台没标 AI 的也可能没人校订。
 6. 字幕明显不可信且用户同意重识别时，才在已配好 cloud 且有上传授权的前提下用 `forceAsr=true`、`reason=unreliable_captions`，仍传本次已确认的 `outputStyle`；用户直接要求用 `user_requested`。captions 模式禁止 `forceAsr`，没有上传授权不得上传。

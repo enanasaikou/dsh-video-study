@@ -302,7 +302,7 @@ test('captions reports both missing dependencies with their own purpose and an e
   assert.equal(result.python, 'C:/Python/python.exe');
   assert.ok(result.lines.includes('找到 Python：C:/Python/python.exe'));
   assert.ok(result.lines.includes('缺少：yt-dlp（YouTube 字幕）、python-docx（Word 导出）'));
-  assert.match(result.next, /一键准备运行环境/);
+  assert.match(result.next, /一键准备\/修复运行环境/);
   const rendered = await renderMode('captions', { ...f.controller.snapshot() }); const text = JSON.stringify(rendered.tree);
   for (const hidden of ['没有找到可用的 Python', 'UNTRUSTED-DEPENDENCY', '__proto__', OLD_KEY])
     assert.equal(text.includes(hidden), false, hidden);
@@ -319,7 +319,7 @@ test('captions missing only Word export stays unready and never mislabels it as 
   assert.deepEqual(Array.from(result.missing), ['python-docx']);
   assert.ok(result.lines.includes('找到 Python：/state/venv/bin/python'));
   assert.ok(result.lines.includes('缺少：python-docx（Word 导出）'));
-  assert.match(result.next, /一键准备运行环境/);
+  assert.match(result.next, /一键准备\/修复运行环境/);
   const rendered = await renderMode('captions', { ...f.controller.snapshot() }); const text = JSON.stringify(rendered.tree);
   for (const hidden of ['没有找到可用的 Python', 'yt-dlp（', 'python-docx（YouTube 字幕）',
     'UNTRUSTED-DEPENDENCY', '<script>', OLD_KEY]) assert.equal(text.includes(hidden), false, hidden);
@@ -584,7 +584,7 @@ test('dirty form disables environment/setup UI buttons but preserves save and re
   const buttons = treeNodes(f.tree).filter(node => node.type === 'button');
   const named = name => buttons.find(node => node.children[0] === name);
   assert.equal(named('检查环境').props.disabled, true); assert.equal(named('生成部署命令').props.disabled, true);
-  assert.equal(named('一键准备运行环境').props.disabled, true);
+  assert.equal(named('一键准备/修复运行环境').props.disabled, true);
   assert.equal(named('保存设置').props.disabled, false);
 });
 
@@ -699,7 +699,7 @@ test('optional environment metadata never introduces model defaults or leaks int
     f.controller.update('stateDir', '/custom/state');
     const rendered = await renderMode('cloud', { ...f.controller.snapshot() });
     const text = JSON.stringify(rendered.tree);
-    assert.match(text, /选择Python安装或venv文件夹；留空自动查找/);
+    assert.match(text, /可选自定义Python安装或venv文件夹；留空优先使用已准备的托管环境，不写死版本路径/);
     for (const removed of ['BAD-RAW-DEFAULT', '/models/', '模型目录']) assert.equal(text.includes(removed), false);
     assert.equal(f.calls.length, 1);
     assert.equal('localDefaults' in f.controller.snapshot().draft, false); await f.controller.save();
@@ -709,7 +709,7 @@ test('optional environment metadata never introduces model defaults or leaks int
 
 test('environment settings keep only short Python hints and no model deployment guide', async () => {
   const f = await renderMode('cloud'); const nodes = treeNodes(f.tree); const text = JSON.stringify(f.tree);
-  for (const phrase of ['选择Python文件夹…', '选择Python安装或venv文件夹；留空自动查找'])
+  for (const phrase of ['选择Python文件夹…', '可选自定义Python安装或venv文件夹；留空优先使用已准备的托管环境，不写死版本路径'])
     assert.ok(text.includes(phrase), phrase);
   for (const phrase of ['初次部署推荐', '服务端本机路径', '不会安装到显式Python路径或模型目录', '不保证CUDA', 'forceAsr:true'])
     assert.equal(text.includes(phrase), false, phrase);
@@ -748,7 +748,7 @@ test('offline status displays only known absolute resolved paths and safe next s
     await f.controller.load(); await f.controller.check();
     const result = f.controller.snapshot().result;
     assert.equal(result.python, bad ? '' : '/state/venv/bin/python'); assert.equal('modelDir' in result, false);
-    assert.match(result.next, /一键准备运行环境/);
+    assert.match(result.next, /一键准备\/修复运行环境/);
     assert.equal(/生成部署命令|模型|faster-whisper|CUDA/.test(JSON.stringify(result)), false);
     const rendered = await renderMode('cloud', { ...f.controller.snapshot() });
     assert.equal(JSON.stringify(rendered.tree).includes(OLD_KEY), false);
@@ -824,7 +824,7 @@ test('picker timeout releases UI even if the desktop IPC never settles and shows
   assert.deepEqual(f.calls.map(call => call.action), ['config']); f.controller.dispose();
 });
 
-test('one click install posts once, polls progress and applies the auto-filled Python path', async () => {
+test('legacy install response still accepts a backend-provided managed venv path', async () => {
   const timers = [];
   let polls = 0;
   const f = await fixture({ values: { mode: 'cloud' }, reply: async action => {
@@ -910,6 +910,48 @@ test('install surfaces a configured custom interpreter without pretending it pre
   assert.equal(JSON.stringify(snapshot).includes('已就绪'), false);
   assert.deepEqual(f.calls.map(call => call.action), ['config', 'setup-install']);
   f.controller.dispose();
+});
+
+test('managed runtime preparation displays resolved Python but keeps the saved path empty and dependencies API unchanged', async () => {
+  const python = 'C:/state/runtimes/cpython-fixed-win-x64-unique/python.exe';
+  const f = await fixture({ reply: async action => action === 'setup-install' ? ok({ status: 'ok', result: {
+    status: 'prepared', running: false, runtime_managed: true, python_path: python,
+    dependencies: { ytDlp: true, docx: true },
+    config: { status: 'ok', revision: 4, values: { ...defaults }, secretConfigured: false },
+  } }) : undefined });
+  await f.controller.load(); assert.equal(await f.controller.install(), true);
+  const state = f.controller.snapshot();
+  assert.equal(state.install.python, python); assert.equal(state.draft.pythonPath, '');
+  assert.equal(state.values.pythonPath, ''); assert.equal(state.dirty, false);
+  assert.equal(state.install.dependencies.ytDlp, true); assert.equal(state.install.dependencies.docx, true);
+  assert.deepEqual(f.calls.map(call => call.action), ['config', 'setup-install']);
+  const rendered = await renderMode('captions', { ...state }); const text = JSON.stringify(rendered.tree);
+  for (const phrase of ['一键准备/修复运行环境', '仅点击准备/修复才联网下载', '不用系统Python或pip',
+    '其他系统需已有Python 3.10+', '失败保留旧环境', '不自动更新', '高级系统Python方案']) assert.ok(text.includes(phrase), phrase);
+  assert.ok(text.includes(python)); f.controller.dispose();
+});
+
+test('repair failures keep the saved interpreter and settings, do not retry or invent new status fields', async () => {
+  for (const status of ['setup_failed', 'setup_timeout', 'setup_cancelled', 'setup_incomplete']) {
+    const f = await fixture({ values: { pythonPath: 'C:/state/venv/Scripts/python.exe' },
+      reply: async action => action === 'setup-install' ? ok({ status: 'ok', result: { status, running: false,
+        dependencies: { ytDlp: false, docx: false } } }) : undefined });
+    await f.controller.load(); const before = JSON.stringify(f.controller.snapshot().values);
+    assert.equal(await f.controller.install(), true); await flush();
+    const state = f.controller.snapshot();
+    assert.equal(JSON.stringify(state.values), before); assert.equal(state.dirty, false);
+    assert.equal(state.busy, false); assert.equal(state.install.status, status);
+    assert.match(state.notice, /手动重试/);
+    assert.deepEqual(f.calls.map(call => call.action), ['config', 'setup-install']);
+    const rendered = await renderMode('captions', { ...state });
+    const button = treeNodes(rendered.tree).find(node => node.type === 'button' && node.children[0] === '一键准备/修复运行环境');
+    assert.equal(button.props.disabled, false); f.controller.dispose();
+  }
+});
+
+test('non-dependency configuration errors do not misleadingly recommend installing a runtime', async () => {
+  const f = await checkedSummary({ status: 'ok', backend: { status: 'invalid_api_key' } }, 'cloud');
+  assert.equal(f.controller.snapshot().result.next, ''); f.controller.dispose();
 });
 
 test('component mount loads only config, and effect cleanup/StrictMode does not retain old controllers', async () => {

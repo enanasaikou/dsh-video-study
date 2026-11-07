@@ -592,6 +592,17 @@ test('desktop resolve POST validates purpose and local absolute directory withou
   assert.equal(calls.length, 1); assert.equal(f.calls.mutate.length, 0); assert.equal(f.calls.setup.length, 0); assert.equal(f.calls.status.length, 0);
 });
 
+test('private runtime activation never pins a version-specific path into native settings', async () => {
+  const source = fixture();
+  source.setInstall({ status: 'prepared', running: false, runtime_managed: true,
+    python_path: 'D:/state/runtimes/cpython-3.14.10-win-x64-test/python.exe', dependencies: { ytDlp: true, docx: true } });
+  const f = routes(source);
+  const result = await f.request('setup-install-status', undefined, { method: 'GET' });
+  assert.equal(result.data.result.runtime_managed, true);
+  assert.equal(result.data.result.python_path_saved, undefined);
+  assert.equal(f.calls.mutate.length, 0);
+});
+
 test('runtime errors and missing settings/runtime never echo raw exception values', async () => {
   const f = routes(); f.runtime.status = async () => { throw new Error(SECRET + ' other-instance'); };
   assert.equal((await f.request('status', {})).data.code, 'settings_unavailable');

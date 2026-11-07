@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-study",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "description": "在 DeepSeek Harness 中将 YouTube / B站课程整理成中文讲义，支持字幕优先、可选云端识别及 Word 导出。",
   "repository": { "type": "git", "url": "git+https://github.com/enanasaikou/dsh-video-study.git" },
   "homepage": "https://github.com/enanasaikou/dsh-video-study#readme",

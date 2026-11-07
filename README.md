@@ -4,7 +4,9 @@
 
 这是 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的视频学习插件，不是独立播放器。在对话里给出课程链接，选择完整复述、简要压缩或总结，由助手整理为 Word、Markdown 或 TXT。
 
-云端稳定版 0.8.4 · [开始使用](docs/getting-started.md) · [云端配置](docs/cloud-services.md) · [常见问题](docs/troubleshooting.md)
+云端稳定版 0.9.0 · [开始使用](docs/getting-started.md) · [云端配置](docs/cloud-services.md) · [常见问题](docs/troubleshooting.md)
+
+> 0.9.0 新增 Windows 私有运行环境。Windows x64 已通过真实下载、哈希校验、依赖导入、中文 Word 导出与再次启动复用验收；arm64 已核对固定产物清单并通过离线分支测试，尚未完成 arm64 真机验收。运行环境检查不代表云端 Key 或实际视频转写已验证。
 
 ![工作流程示意：课程链接，字幕优先，按选择整理，输出可编辑讲义。云端识别需要另行授权。](docs/assets/workflow.svg)
 
@@ -24,7 +26,7 @@
 
 ### 1. 安装到 DSH
 
-需要已运行的 DSH `>=0.2.1-rc.5 <0.3.0`、Node.js `>=22.19.0` 和 Python `3.10+`。这些运行时不由插件安装。
+需要已运行的 DSH `>=0.2.1-rc.5 <0.3.0` 和 Node.js `>=22.19.0`，宿主与 Node 不由插件安装。Windows x64 / arm64 可由设置页按钮准备插件私有 Python，无需先安装系统 Python；其他系统仍需本机 Python `3.10+`。
 
 当前安装方式是 **本地 TGZ**，不是 `npm install dsh-video-study`。可使用维护者提供的包；没有 TGZ 时，在本仓库源码根目录执行：
 
@@ -32,13 +34,15 @@
 npm pack --ignore-scripts
 ```
 
-它会生成 `dsh-video-study-0.8.4.tgz`。在 DSH 插件管理中选择该文件安装，然后完整重载 DSH。源码已包含预构建客户端，打包不需要先安装项目依赖。
+它会生成 `dsh-video-study-0.9.0.tgz`。在 DSH 插件管理中选择该文件安装，然后完整重载 DSH。源码已包含预构建客户端，打包不需要先安装项目依赖。
 
 [获取源码、打包和安装的逐步说明 →](docs/getting-started.md#1-安装插件)
 
 ### 2. 准备环境，先用字幕模式
 
-打开 **DSH 设置 → 视频学习 → 字幕与ASR**，保持默认字幕模式，点击 **一键准备运行环境**。这会安装字幕与 Word 导出所需的配套依赖，不会安装识别模型或调用云端 API。
+打开 **DSH 设置 → 视频学习 → 字幕与ASR**，保持默认字幕模式，Python 路径留空，点击 **一键准备/修复运行环境**。仅这次显式点击才联网下载：Windows 使用固定版本官方 CPython embeddable ZIP 与固定哈希的 PyPI wheel，在插件状态目录的 `runtimes` 下创建版本唯一的私有环境；其他系统仍基于本机 Python `3.10+` 创建 venv。它安装字幕和 Word 依赖，不安装 ASR 模型或 ffmpeg、不调用云端 API、不自动更新。
+
+Python 路径留空会自动选择已准备的新托管环境，不写死版本绝对路径；同一状态目录的旧托管 venv 路径兼容，真正自定义的解释器不改动。准备或修复失败保留旧环境、任务与配置，查看提示后由你手动重试。打开设置、检查环境和普通任务不会自动下载安装。
 
 准备完成后点击 **检查环境**。离线检查可告诉你 Python 和必要依赖是否可用，但不代表视频一定有字幕，也不验证云端 Key 或余额。
 
@@ -88,7 +92,7 @@ video-study/
 ## 遇到问题，从这里开始
 
 - **YouTube 连接失败或 10054**：先检查网络 / HTTP 代理；这不表示视频没有字幕。
-- **环境检查提示缺依赖**：点击一键准备，或检查是否指定了另一个自定义 Python。
+- **环境检查提示缺依赖**：点击准备/修复；Windows 无需先装系统 Python，其他系统需 Python `3.10+`。若指定了真正的自定义 Python，请自行检查该环境。高级“生成部署命令”仍是系统 Python 方案，不是 Windows 主按钮的下载流程。
 - **B站要求登录**：在 **B站登录** 标签扫码并确认，不需要分享浏览器 Cookie 或密码。
 - **想用自己的 ASR 服务**：先看[完整接口地址、协议和上传授权示例](docs/cloud-services.md)。
 

@@ -10,9 +10,9 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const json = filename => JSON.parse(readFileSync(join(root, filename), 'utf8'));
 const pkg = json('package.json');
 assert.equal(pkg.name, 'dsh-video-study');
-assert.equal(pkg.version, '0.8.4');
+assert.equal(pkg.version, '0.9.0');
 assert.deepEqual(MODES, ['captions', 'cloud']);
-assert.match(readFileSync(join(root, 'README.md'), 'utf8'), /云端稳定版 0\.8\.4/);
+assert.match(readFileSync(join(root, 'README.md'), 'utf8'), /云端稳定版 0\.9\.0/);
 assert.ok(pkg.peerDependencies['@deepseek-ai/dsh-host-directory-picker']);
 assert.equal(pkg.type, 'module');
 assert.equal(pkg.main, 'lib/index.js');
@@ -77,7 +77,23 @@ assert.ok(records.some(item => item.path === 'lib/workspace-paths.mjs'));
 assert.match(readFileSync(join(root, 'python/requirements.txt'), 'utf8'), /yt-dlp==2026\.8\.19/);
 assert.match(readFileSync(join(root, 'python/setup_environment.py'), 'utf8'), /python-docx==1\.2\.0/,'One-click install must include the Word export dependency');
 const clientBundle = readFileSync(join(root, 'lib/client.js'), 'utf8');
-assert.match(clientBundle, /一键准备运行环境/);
+assert.match(clientBundle, /一键准备\/修复运行环境/);
+for (const filename of ['lib/portable-archive.mjs', 'lib/portable-runtime.mjs', 'lib/portable-runtime-lock.json'])
+  assert.ok(records.some(item => item.path === filename), `Missing private runtime payload: ${filename}`);
+const portableLock = json('lib/portable-runtime-lock.json');
+assert.equal(portableLock.pythonVersion, '3.14.10');
+assert.deepEqual(Object.keys(portableLock.platforms).sort(), ['arm64', 'x64']);
+for (const entry of Object.values(portableLock.platforms)) {
+  assert.equal(entry.wheels.length, 4);
+  for (const artifact of [entry.python, ...entry.wheels]) {
+    const url = new URL(artifact.url);
+    assert.equal(url.protocol, 'https:');
+    assert.ok(['www.python.org', 'files.pythonhosted.org'].includes(url.hostname));
+    assert.equal(url.search + url.hash + url.username + url.password, '');
+    assert.match(artifact.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(Number.isSafeInteger(artifact.size) && artifact.size > 0 && artifact.size < 32 * 1024 * 1024);
+  }
+}
 assert.match(clientBundle, /setup-install-status/);
 for (const record of records.filter(item => /\.(?:py|mjs|js|txt)$/.test(item.path))) {
   assert.doesNotMatch(readFileSync(join(root, record.path), 'utf8'), /faster[_-]whisper|ctranslate2|WhisperModel|huggingface_hub/,

@@ -1061,7 +1061,8 @@ test('recursive sanitizer drops credential-shaped keys, keeps public Bilibili id
 });
 
 const hostedState = join(home, '.dsh', 'state', 'dsh-video-study');
-const venvPython = join(hostedState, 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+// Legacy CLI installer remains supported on non-Windows; Windows is tested separately.
+const venvPython = join(hostedState, 'venv', 'bin/python');
 
 function installHarness(options = {}) {
   const calls = [], scratch = { path: join(workspace, '.fake-install-scratch'), bases: [], disposals: 0 };
@@ -1096,7 +1097,7 @@ function installHarness(options = {}) {
       return { path: scratch.path, dispose: async () => { scratch.disposals += 1; } }; },
     homedirImpl: () => home,
     tmpdirImpl: () => { throw Error('must not use global temp fallback'); },
-    uuidImpl: () => 'install-uuid', platform: process.platform,
+    uuidImpl: () => 'install-uuid', platform: 'linux',
     terminateImpl: async child => { child.kill('SIGTERM'); return true; }, ...options.dependencies });
   return { runtime, calls, scratch, home,
     scripts: () => calls.filter(record => record.args.some(arg => arg.endsWith(join('python', 'setup_environment.py')))) };

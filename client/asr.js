@@ -14,7 +14,7 @@ function createAsrSettings(React, platform) {
     settings_conflict: '设置已在其它位置修改，请重新载入后再编辑。',
     invalid_input: '设置格式无效，请检查字段后重试。', invalid_settings: '设置值无效，请检查字段后重试。',
     invalid_config: '配置无效，请检查字段后重试。',
-    dependency_missing: '缺少Python或所需依赖，请检查环境并配置Python路径。',
+    dependency_missing: '缺少Python或所需依赖。Windows可点击准备/修复；其他系统需先有Python 3.10+。自定义Python请自行检查依赖。',
     workspace_required: '需要当前会话的工作区；请把这条命令放到会话里执行，或在设置中填写对应的绝对目录。',
     workspace_unavailable: '任务目录不可写或包含链接；请检查工作区权限或显式目录，不会改写到其它位置。',
     path_picker_unavailable: '宿主路径选择器不可用，请手动填写服务端本机绝对路径；Python请填解释器文件路径。',
@@ -137,7 +137,7 @@ function createAsrSettings(React, platform) {
       if (python) lines.push('使用的 Python：' + python);
     } else if (status === 'dependency_missing' || status === 'not_runtime_checked') {
       if (python) lines.push('找到 Python：' + python);
-      else if (status === 'dependency_missing') lines.push('没有找到可用的 Python（需要 3.10 或更新版本）。');
+      else if (status === 'dependency_missing') lines.push('没有找到可用的 Python；Windows可准备私有运行环境，其他系统需Python 3.10+。');
       if (missing.length) lines.push('缺少：' + missing.map(function (name) {
         return name + (name === 'yt-dlp' ? '（YouTube 字幕）' : '（Word 导出）');
       }).join('、'));
@@ -147,7 +147,8 @@ function createAsrSettings(React, platform) {
       lines.push(labels[status]);
       if (python) lines.push('使用的 Python：' + python);
     }
-    var next = status === 'ok' ? '' : '点“一键准备运行环境”可以自动装好这些组件。';
+    var next = status === 'dependency_missing' || status === 'not_runtime_checked'
+      ? '点“一键准备/修复运行环境”准备托管组件；自定义Python不会被修改。' : '';
     return { label: status === 'ok' ? '环境可用' : labels[status], lines: lines, next: next,
       missing: missing, python: python, ready: status === 'ok' };
   }
@@ -160,9 +161,9 @@ function createAsrSettings(React, platform) {
         || /https?:\/\/[^\s/'"]*@/i.test(command)) throw fail('invalid_response');
     return command;
   }
-  var installLabels = { idle: '尚未准备', setup_running: '正在准备运行环境…', prepared: '运行环境已就绪',
-    setup_incomplete: '环境已创建，但依赖自检未通过', setup_failed: '环境准备失败',
-    setup_timeout: '环境准备超时', setup_cancelled: '环境准备已取消',
+  var installLabels = { idle: '尚未准备', setup_running: '正在准备/修复运行环境…', prepared: '运行环境已就绪',
+    setup_incomplete: '依赖自检未通过，请检查后手动重试', setup_failed: '环境准备/修复失败，请检查后手动重试',
+    setup_timeout: '环境准备/修复超时，请检查后手动重试', setup_cancelled: '环境准备/修复已取消，需手动重试',
     custom_python_configured: '已配置自定义 Python，未创建托管环境' };
   function installSummary(raw) {
     if (!raw || typeof raw !== 'object' || typeof raw.status !== 'string'
@@ -324,10 +325,10 @@ function createAsrSettings(React, platform) {
         try { var value = await call('setup', 'POST', {}); emit({ busy: false, command: safeCommand(value.result) }); return !disposed; }
         catch (error) { emit({ busy: false, error: errorText(error) }); return false; }
       },
-      // 用户点一下就把插件自己的 venv 装好，并把路径写回设置；不需要粘贴命令。
+      // 仅用户点击才准备/修复托管环境；配置由后端返回，客户端不回填版本绝对路径。
       install: async function () {
         if (!requireSaved()) return false;
-        emit({ busy: true, error: '', command: '', result: null, install: null, notice: '正在准备运行环境…' });
+        emit({ busy: true, error: '', command: '', result: null, install: null, notice: '正在准备/修复运行环境…' });
         try {
           var current = installSummary((await call('setup-install', 'POST', {})).result);
           emit({ install: current, notice: current.progress || current.label });
@@ -338,7 +339,7 @@ function createAsrSettings(React, platform) {
             rounds += 1;
             current = installSummary((await call('setup-install-status', 'GET')).result);
             // 只保留一行：新进度直接覆盖旧的，不累积日志。
-            emit({ install: current, notice: current.running ? (current.progress || '正在准备运行环境…') : current.label });
+            emit({ install: current, notice: current.running ? (current.progress || '正在准备/修复运行环境…') : current.label });
           }
           if (disposed) return false;
           if (current.config) { try { accept(current.config, ''); } catch (_) { /* 刷新失败不影响安装结果 */ } }
@@ -428,19 +429,19 @@ function createAsrSettings(React, platform) {
         checkbox('cloudUploadConsent', '允许上传音频到此服务（可能产生费用）')) : null,
       e('details', null, e('summary', null, '高级设置'), e('div', { style: { display: 'grid', gap: 10, paddingTop: 10 } },
         pathField('pythonPath', 'Python路径（解释器文件，可留空）', '选择Python文件夹…',
-          '选择Python安装或venv文件夹；留空自动查找。'),
+          '可选自定义Python安装或venv文件夹；留空优先使用已准备的托管环境，不写死版本路径。'),
         input('stateDir', '状态目录（留空用插件默认位置）'), input('outputDir', '输出目录'), input('proxy', '代理'),
         activeMode === 'cloud' ? e('div', { style: { display: 'grid', gap: 10 } }, input('cloudApiKeyFile', 'Key文件（可选）'),
           input('cloudMaxAudioMiB', '最大音频MiB', 'number'), checkbox('allowInsecureLoopback', '允许本机回环HTTP服务')) : null,
         activeMode === 'cloud' ? e('div', { style: { display: 'grid', gap: 10 } }, input('downloadTimeout', '下载超时秒', 'number'),
           input('asrTimeout', '转写超时秒', 'number'), input('maxDuration', '最长音频秒', 'number')) : null)),
       e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
-        button(view.install && view.install.running ? '正在准备…' : '一键准备运行环境', 'install', disabled || view.dirty || !view.values),
+        button(view.install && view.install.running ? '正在准备/修复…' : '一键准备/修复运行环境', 'install', disabled || view.dirty || !view.values),
         button('检查环境', 'check', disabled || view.dirty || !view.values),
         button('生成部署命令', 'setup', disabled || view.dirty || !view.values),
         button('保存设置', 'save', disabled || !view.dirty), button('重新载入', 'load', view.loading || view.busy)),
       e('p', { style: { margin: 0, fontSize: 13, opacity: 0.85, overflowWrap: 'anywhere' } },
-        '一键准备会在插件自己的目录里创建隔离 Python 环境，并安装 yt-dlp、python-docx；不修改系统 Python，可随时重来。',
+        '仅点击准备/修复才联网下载。Windows下载固定版本官方CPython及校验哈希的依赖，不用系统Python或pip；其他系统需已有Python 3.10+并创建venv。失败保留旧环境，需手动重试；不下载ASR模型或ffmpeg，不自动更新。生成部署命令仍是高级系统Python方案。',
         !draft.stateDir && view.localDefaults && view.localDefaults.stateDir
           ? e('span', null, ' 安装位置：', e('code', null, view.localDefaults.stateDir)) : null),
       view.dirty ? e('p', { role: 'status' }, '有未保存的修改。') : null,
@@ -450,7 +451,7 @@ function createAsrSettings(React, platform) {
         style: { display: 'grid', gap: 4, minWidth: 0, overflowWrap: 'anywhere' } },
         // 只保留一行进度：新的进度覆盖旧的，不累积日志。
         view.install.running
-          ? e('p', { style: { margin: 0 } }, view.install.progress || '正在准备运行环境…')
+          ? e('p', { style: { margin: 0 } }, view.install.progress || '正在准备/修复运行环境…')
           : e('p', { style: { margin: 0 } }, view.install.label + (view.install.message ? '：' + view.install.message : '')),
         view.install.python ? e('p', { style: { margin: 0 } }, '托管 Python：', e('code', null, view.install.python)) : null,
         view.install.dependencies ? e('p', { style: { margin: 0 } },

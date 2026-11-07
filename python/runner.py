@@ -16,6 +16,12 @@ import tempfile
 import time
 from types import SimpleNamespace
 
+# Embeddable CPython's isolated _pth intentionally excludes the script directory.
+# Add only this installed plugin's code directory, never cwd or user site-packages.
+_PLUGIN_CODE = str(Path(__file__).resolve().parent)
+if _PLUGIN_CODE not in sys.path:
+    sys.path.insert(0, _PLUGIN_CODE)
+
 MODES = ('captions', 'cloud')
 LANGUAGES = ('en', 'zh', 'auto')
 # Protocol stage names are constants owned by the adapter modules; anything else
