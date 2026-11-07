@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="340" viewBox="0 0 1120 340" role="img" aria-labelledby="title desc">
+  <title id="title">dsh-video-study 工作流程示意</title>
+  <desc id="desc">从 YouTube 或 B站课程链接开始，优先使用字幕，按本次选择整理为中文讲义，再导出 Word、Markdown 或 TXT。云端识别仅在配置且授权后使用。这是示意图，不是界面截图。</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0d1930"/><stop offset="1" stop-color="#172e49"/></linearGradient>
+    <linearGradient id="card" x2="0" y2="1"><stop stop-color="#223b57"/><stop offset="1" stop-color="#192e47"/></linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#7393b5" stroke-width="1.5"/></marker>
+  </defs>
+  <rect width="1120" height="340" rx="22" fill="url(#bg)"/>
+  <g font-family="system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif">
+    <text x="36" y="45" font-size="14" letter-spacing="2" fill="#70d7d0">DSH VIDEO STUDY · 工作流程示意</text>
+    <text x="36" y="84" font-size="27" font-weight="700" fill="#f3f7fb">从一节课，到一份可以继续学习的讲义</text>
+    <g fill="url(#card)" stroke="#3b5673"><rect x="36" y="119" width="235" height="128" rx="14"/><rect x="307" y="119" width="235" height="128" rx="14"/><rect x="578" y="119" width="235" height="128" rx="14"/><rect x="849" y="119" width="235" height="128" rx="14"/></g>
+    <g stroke="#7393b5" stroke-width="2" marker-end="url(#arrow)"><path d="M280 183H296"/><path d="M551 183H567"/><path d="M822 183H838"/></g>
+    <g font-size="13" font-weight="600" fill="#70d7d0"><text x="55" y="147">01 · 给出链接</text><text x="326" y="147">02 · 字幕优先</text><text x="597" y="147">03 · 按本次选择整理</text><text x="868" y="147">04 · 导出讲义</text></g>
+    <g font-size="21" font-weight="650" fill="#f3f7fb"><text x="55" y="186">YouTube / B站</text><text x="326" y="186">已有字幕 → 素材</text><text x="597" y="186">复述 / 压缩 / 总结</text><text x="868" y="186">Word / MD / TXT</text></g>
+    <g font-size="14" fill="#b8cadd"><text x="55" y="219">在 DSH 对话中开始</text><text x="326" y="219">需要时再授权云端识别</text><text x="597" y="219">保留公式、条件与来源边界</text><text x="868" y="219">保存到当前工作区</text></g>
+    <circle cx="43" cy="285" r="4" fill="#70d7d0"/><text x="57" y="290" font-size="15" fill="#c6d8e7">默认不上传音频 · 云端识别需另行授权，可能收费 · 不在本机下载识别模型</text>
+    <text x="36" y="320" font-size="12" fill="#8da9c3">流程示意，非产品界面截图；实际整理效果以素材和最终文档为准。</text>
+  </g>
+</svg>

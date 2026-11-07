@@ -1,7 +1,10 @@
 {
   "name": "dsh-video-study",
   "version": "0.8.4",
-  "description": "YouTube/B站字幕与课程资料云端发行版：默认仅字幕、可选云端ASR，DSH设置内B站扫码登录；一键准备运行环境。",
+  "description": "在 DeepSeek Harness 中将 YouTube / B站课程整理成中文讲义，支持字幕优先、可选云端识别及 Word 导出。",
+  "repository": { "type": "git", "url": "git+https://github.com/enanasaikou/dsh-video-study.git" },
+  "homepage": "https://github.com/enanasaikou/dsh-video-study#readme",
+  "bugs": { "url": "https://github.com/enanasaikou/dsh-video-study/issues" },
   "type": "module",
   "main": "lib/index.js",
   "exports": { ".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json" },
@@ -12,12 +15,13 @@
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-settings-general"] }
   },
-  "files": ["lib", "python", "skills", "client/vendor/LICENSE.qrcode-generator", "client/vendor/README.md", "cordis.patch.yml", "LICENSE", "LICENSE-UPSTREAM", "THIRD_PARTY_NOTICES.md", "README.md", "SECURITY.md"],
+  "files": ["lib", "python", "skills", "client/vendor/LICENSE.qrcode-generator", "client/vendor/README.md", "cordis.patch.yml", "LICENSE", "LICENSE-UPSTREAM", "THIRD_PARTY_NOTICES.md", "README.md", "SECURITY.md", "CHANGELOG.md", "docs"],
   "scripts": {
     "test": "node --test",
     "build:client": "node client/build.mjs",
     "test:python": "python -B scripts/test_python.py",
-    "check:package": "node scripts/check-package.mjs"
+    "check:package": "node scripts/check-package.mjs",
+    "check:docs": "node scripts/check-docs.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
