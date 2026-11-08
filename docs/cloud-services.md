@@ -18,15 +18,15 @@ Key 输入框留空表示保留已保存值；删除要勾“清除已保存的K
 
 | 界面协议 / 配置值 | API地址示例（完整接口，不是控制台网址） | 模型 / 引擎参数示例 | 其他必填项 |
 | --- | --- | --- | --- |
-| OpenAI兼容文件转写 / `openai` | `https://api.openai.com/v1/audio/transcriptions` | `whisper-1` | API Key |
-| DashScope Paraformer异步 / `dashscope_paraformer` | `https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription` | `paraformer-v2` | API Key |
-| Qwen-ASR聊天接口 / `dashscope_qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | `qwen3-asr-flash` | API Key |
-| 火山 / 豆包极速识别 / `volcengine_flash` | `https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash` | `bigmodel` | App ID、Access Token、语音资源ID（如账户开通的 `volc.bigasr.auc_turbo`） |
-| 腾讯云录音识别TC3 / `tencent_rec_task` | `https://asr.tencentcloudapi.com/` | `16k_zh` | SecretId、SecretKey；地域可留空或填账户适用值（如 `ap-guangzhou`） |
+| 通用 / OpenAI兼容 / `openai` | `https://api.openai.com/v1/audio/transcriptions` | `whisper-1` | API Key |
+| 阿里 / 录音文件转写 / `dashscope_paraformer` | `https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription` | `paraformer-v2` | API Key |
+| 阿里 / Qwen短音频 / `dashscope_qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | `qwen3-asr-flash` | API Key |
+| 火山 / 豆包录音转写 / `volcengine_flash` | `https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash` | `bigmodel` | App ID、Access Token、语音资源ID（如账户开通的 `volc.bigasr.auc_turbo`） |
+| 腾讯 / 录音文件转写 / `tencent_rec_task` | `https://asr.tencentcloudapi.com/` | `16k_zh` | SecretId、SecretKey；地域可留空或填账户适用值（如 `ap-guangzhou`） |
 
 阿里北京地域也可按官方要求，把示例域名替换为你自己的 `{WorkspaceId}.cn-beijing.maas.aliyuncs.com`，保留后面的完整路径；不要把花括号占位符直接填入。国际站须使用对应地域域名和该地域 Key，不能只换 Key 而保留错误地址。
 
-“自动兼容旧设置”用于旧配置，不会自动识别任意厂商协议；新配置建议明确选择协议。原生协议会构造各厂商专用的 JSON、签名、上传和轮询流程；OpenAI兼容协议则发送 multipart 文件转写请求，不能代替这些原生流程。
+“旧配置兼容（非自动识别）”用于旧配置，不会自动识别任意厂商协议；新配置建议明确选择协议。界面随选择显示用途、完整接口和模型占位示例，但不会自动填入地址、模型或凭据，也不会因此发起请求。原生协议会构造各厂商专用的 JSON、签名、上传和轮询流程；OpenAI兼容协议则发送 multipart 文件转写请求，不能代替这些原生流程。
 
 ### 第一次配置：OpenAI 文件转写示例
 
@@ -36,7 +36,7 @@ Key 输入框留空表示保留已保存值；删除要勾“清除已保存的K
 | --- | --- |
 | 模式 | 云端ASR |
 | 服务名称 | 任意便于自己识别的备注，例如“OpenAI 音频转写” |
-| 接口协议 | OpenAI兼容文件转写 |
+| 接口协议 | 通用 / OpenAI兼容 |
 | API地址 | `https://api.openai.com/v1/audio/transcriptions` |
 | 模型 / 引擎参数 | `whisper-1` |
 | 响应请求格式 | `verbose_json` |
@@ -50,8 +50,8 @@ Key 输入框留空表示保留已保存值；删除要勾“清除已保存的K
 ## 各协议实际边界
 
 - **OpenAI兼容**：“响应请求格式”可选 `verbose_json`、`json` 或 `provider_default`。服务不接受扩展参数时可选“服务默认（只传文件和模型）”；它不发送语言/时间戳等提示。只有返回受支持的有效 JSON 正文才可继续；不兼容任意聊天/流式接口。真实分段才生成 SRT；只有全文时保留全文，不猜时间戳。
-- **DashScope 异步**：插件申请临时上传凭证、上传音轨、提交任务并轮询结果。`qwen3-asr-flash-filetrans` 等 **filetrans** 模型也应选择此异步协议与 `/api/v1/services/audio/asr/transcription` 路径，而不是 Qwen 聊天协议。界面协议名称仍为“DashScope Paraformer异步”。临时对象存储上传不等于纯本机处理；官方不建议将临时上传方案用于生产、高并发或压测。
-- **Qwen 聊天**：发送内联 Base64 Data URI 音频，当前接收纯文本识别结果，不产出 SRT。编码后音频连同 Data URI 前缀不得超过 **10,000,000 字节**，所以不能把“最大音频MiB”当作唯一限制；不支持在这里换填 filetrans 模型。
+- **阿里 / 录音文件转写**：插件申请临时上传凭证、上传音轨、提交任务并轮询结果。`paraformer-v2` 和 `qwen3-asr-flash-filetrans` 等 **filetrans** 模型都选此项，使用 `/api/v1/services/audio/asr/transcription` 路径，而不是 Qwen短音频项。filetrans 返回官方 OSS HTTP 结果链接时，完整校验后只以同主机 HTTPS:443 读取，保留原签名路径与查询串；不发明文请求，不接受网关 HTTP，不在 TLS 失败后降级或重试。临时对象存储上传不等于纯本机处理；官方不建议将临时上传方案用于生产、高并发或压测。
+- **阿里 / Qwen短音频**：发送内联 Base64 Data URI 音频，当前接收纯文本识别结果，不产出 SRT。编码后音频连同 Data URI 前缀不得超过 **10,000,000 字节**，所以不能把“最大音频MiB”当作唯一限制；不支持在这里换填 filetrans 模型。
 - **火山 / 豆包**：当前使用 App ID + Access Token + 资源ID 的极速版接口，不支持把新式单一 API Key 当作 Access Token 的自动替代。音频最多 **100,000,000 字节、2小时**，还受你设置的更小限额约束。wav/mp3/ogg/opus 直接发送；其他已支持容器需要 PATH 上已有的 ffmpeg 转换，插件不会自动安装 ffmpeg。
 - **腾讯云**：使用 TC3 签名、`CreateRecTask` 和 `DescribeTaskStatus`，仅实现内联音频，原始音频最多 **5,000,000 字节**。官方 URL 音频的大文件额度不适用于此实现。需要真实分段时间戳；已知不提供相应时间戳的引擎会被拒绝。
 
@@ -60,9 +60,9 @@ Key 输入框留空表示保留已保存值；删除要勾“清除已保存的K
 ## 地址、代理与限额
 
 - 远程 API 使用 HTTPS；地址不得带用户名密码、查询参数、片段或路径穿越。自定义完整接口路径不等于兼容任意协议。
-- 云端代理仅支持显式、无认证的 `http://host:port`，不得带业务路径/查询串；不继承系统环境代理。远程 HTTPS 经代理连接，并不因此改成明文 API。
+- 云端代理仅支持显式、无认证的 `http://host:port`，例如 `http://127.0.0.1:7897`。这是本机代理的地址示例，请按实际端口修改；留空不使用插件显式代理，示例不自动填入。不支持 HTTPS/SOCKS 代理，不得带账号密码、业务路径或查询串，不继承系统环境代理。远程 HTTPS 经 HTTP CONNECT 代理后仍使用 TLS，并不因此改成明文 API。
 - “允许本机回环HTTP服务”只用于 OpenAI兼容协议的 `localhost` / `127.0.0.1` / `::1` 本机服务，且不能与代理同时用，不是放行远程 HTTP 的开关。
-- 默认最大音频 **25 MiB**、下载超时 **300秒**、转写超时 **3600秒**、最长音频 **14400秒**。高级设置可调整；最大值分别为 512 MiB、3600秒、86400秒、86400秒。服务商/协议更小的上限仍优先，转写超时包含上传与响应处理，不保证服务端任务会被取消。
+- 默认最大音频 **25 MiB**、下载超时 **300秒**、转写超时 **3600秒**、最长音频 **14400秒**。高级设置可调整；最大值分别为 512 MiB、3600秒、86400秒、86400秒。同步识别等待响应时使用 ASR 总预算的剩余时间，不再额外截断为30秒；上传、等待响应头和读取正文共用预算，连接和上传仍保留短时网络超时。服务商/协议更小的上限仍优先，本机超时不保证服务端任务被取消，也不会自动重传。
 
 ## 官方参考与验证范围
 

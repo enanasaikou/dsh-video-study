@@ -29,6 +29,8 @@ function fixture(config = {}, response, dependencies = {}) {
     return child;
   };
   const runtime = createRuntime(config, { spawnImpl, root: resolve('.'), getWorkspace: async () => home,
+    // This fake process fixture must never discover the user's real runtime.
+    readManagedPythonImpl: async () => null,
     createScratchImpl: async base => ({ path: join(base, '.fake-scratch'), dispose: async () => {} }),
     accessImpl: async () => { throw Error('not installed'); }, terminateImpl: async child => child.kill(), ...dependencies });
   return { runtime, calls, requests: () => calls.filter(call => call.request).map(call => call.request) };

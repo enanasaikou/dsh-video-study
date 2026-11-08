@@ -383,8 +383,12 @@ class _Budget:
         return min(30, self.remaining())
 
 
-def _socket_budget(connection, budget, response=None):
-    remaining = budget.socket_timeout()
+def _socket_budget(connection, budget, response=None, *, response_wait=False):
+    # Connection/upload operations retain the short idle limit. A synchronous
+    # recognizer may compute silently after the upload, so response waits use
+    # the remaining shared deadline instead of an unrelated 30-second cap.
+    # Recompute on every read: no phase or response chunk resets the ASR budget.
+    remaining = budget.remaining() if response_wait else budget.socket_timeout()
     connection.timeout = remaining
     sock = getattr(connection, 'sock', None)
     if sock is None and response is not None:
@@ -446,7 +450,7 @@ def _status(status):
         _fail('provider_error')
 
 
-def _read_response(response, connection, budget):
+def _read_response(response, connection, budget, *, response_wait=False):
     maximum = MAX_RESPONSE_BYTES
     length = response.getheader('Content-Length')
     if length is not None:
@@ -467,7 +471,7 @@ def _read_response(response, connection, budget):
     chunks, total = [], 0
     reader = getattr(response, 'read1', response.read)
     while True:
-        _socket_budget(connection, budget, response)
+        _socket_budget(connection, budget, response, response_wait=response_wait)
         chunk = reader(min(CHUNK_BYTES, maximum - total + 1))
         budget.remaining()
         if not chunk:
@@ -650,11 +654,11 @@ def transcribe_cloud(audio_path, *, endpoint, api_key, model, language,
                 _fail('audio_invalid')
             _socket_budget(connection, budget)
             connection.send(suffix)
-            _socket_budget(connection, budget)
+            _socket_budget(connection, budget, response_wait=True)
             response = connection.getresponse()
             budget.remaining()
             _status(response.status)  # Never read, log, or surface error bodies.
-            raw = _read_response(response, connection, budget)
+            raw = _read_response(response, connection, budget, response_wait=True)
             result = _parse_response(raw, config)
             budget.remaining()
             return result

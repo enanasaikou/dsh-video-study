@@ -64,11 +64,11 @@ def transcribe(audio_path, config, shared):
                 connection.send(body[offset:offset + c.CHUNK_BYTES])
                 budget.remaining()
             c._check_audio_identity(audio, path, identity)
-            c._socket_budget(connection, budget)
+            c._socket_budget(connection, budget, response_wait=True)
             response = connection.getresponse()
             budget.remaining()
             c._status(response.status)
-            raw = c._read_response(response, connection, budget)
+            raw = c._read_response(response, connection, budget, response_wait=True)
         finally:
             try:
                 connection.close()

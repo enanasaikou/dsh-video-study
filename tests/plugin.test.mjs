@@ -974,6 +974,8 @@ test('real process cancellation reaps the runner and its spawned descendant offl
     if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch {} }
   });
   const runtime = createRuntime({}, { spawnImpl: adapterSpawn,
+    // The real process is a Node protocol fixture, not an installed Python.
+    readManagedPythonImpl: async () => null,
     getWorkspace: async () => null,
     createScratchImpl: async () => { throw Error('status must not create scratch'); },
     accessImpl: async () => { throw new Error('no managed fixture'); } });

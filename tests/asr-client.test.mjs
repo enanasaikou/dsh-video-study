@@ -579,6 +579,104 @@ test('every manual cloud protocol retains its credential inputs without presets 
   }
 });
 
+test('proxy examples stay display-only and explain the cloud HTTP-only boundary', async () => {
+  for (const mode of ['captions', 'cloud']) {
+    for (const proxy of ['', 'http://127.0.0.1:3128']) {
+      const values = { ...defaults, mode, proxy }, before = JSON.stringify(values);
+      const f = await renderMode(mode, { draft: values, values });
+      const labels = treeNodes(f.tree).filter(node => node.type === 'label');
+      const field = labels.find(node => node.children[0] === '代理（可选）');
+      const input = treeNodes(field).find(node => node.type === 'input');
+      assert.equal(input.props.placeholder, 'http://127.0.0.1:7897'); assert.equal(input.props.value, proxy);
+      const text = JSON.stringify(f.tree);
+      assert.match(text, /请改为实际代理地址和端口/); assert.match(text, /示例不会自动填入或联网/);
+      if (mode === 'cloud') {
+        assert.match(text, /仅支持不带账号密码的HTTP代理/);
+        assert.match(text, /不支持HTTPS或SOCKS代理/);
+      }
+      assert.equal(JSON.stringify(values), before); assert.deepEqual(f.calls, []);
+    }
+  }
+});
+
+test('cloud protocol menu uses consistent service names while retaining all internal values and legacy auto', async () => {
+  const f = await renderMode('cloud');
+  const label = treeNodes(f.tree).find(node => node.type === 'label' && node.children[0] === '接口协议');
+  const select = treeNodes(label).find(node => node.type === 'select');
+  const options = treeNodes(select).filter(node => node.type === 'option');
+  assert.equal(select.props.value, 'auto');
+  assert.deepEqual(options.map(node => [node.props.value, node.children[0]]), [
+    ['openai', '通用 / OpenAI兼容'], ['dashscope_paraformer', '阿里 / 录音文件转写'], ['dashscope_qwen', '阿里 / Qwen短音频'],
+    ['volcengine_flash', '火山 / 豆包录音转写'], ['tencent_rec_task', '腾讯 / 录音文件转写'], ['auto', '旧配置兼容（非自动识别）'],
+  ]);
+  assert.equal(/TC3|Base64|聊天接口|自动兼容/.test(options.map(node => node.children[0]).join(' ')), false);
+  assert.deepEqual(f.calls, []);
+});
+
+test('selected protocol shows matching full address and model placeholders without changing blank fields', async () => {
+  for (const [protocol, endpoint, model, description] of [
+    ['auto', 'https://api.openai.com/v1/audio/transcriptions', 'whisper-1', '不会智能识别服务'],
+    ['openai', 'https://api.openai.com/v1/audio/transcriptions', 'whisper-1', '不是聊天接口'],
+    ['dashscope_paraformer', 'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription', 'qwen3-asr-flash-filetrans', 'Paraformer（如paraformer-v2）及Qwen filetrans'],
+    ['dashscope_qwen', 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', 'qwen3-asr-flash', '不支持filetrans模型'],
+    ['volcengine_flash', 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash', 'bigmodel', '录音文件极速识别'],
+    ['tencent_rec_task', 'https://asr.tencentcloudapi.com/', '16k_zh', '服务支持的引擎参数'],
+  ]) {
+    const values = { ...defaults, mode: 'cloud', cloudProtocol: protocol }, before = JSON.stringify(values);
+    const f = await renderMode('cloud', { draft: values, values, secretConfigured: false });
+    const nodes = treeNodes(f.tree), text = JSON.stringify(f.tree);
+    const field = name => treeNodes(nodes.find(node => node.type === 'label' && node.children[0] === name)).find(node => node.type === 'input');
+    assert.equal(field('API地址').props.placeholder, '示例：' + endpoint); assert.equal(field('API地址').props.value, '');
+    assert.equal(field('模型 / 引擎参数').props.placeholder, '示例：' + model); assert.equal(field('模型 / 引擎参数').props.value, '');
+    assert.ok(text.includes(description), description);
+    assert.match(text, /不会自动填入或发起请求/); assert.match(text, /账户实际开通能力/);
+    const responseFormat = nodes.find(node => node.type === 'label' && node.children[0] === '响应请求格式');
+    assert.equal(!!responseFormat, protocol === 'auto' || protocol === 'openai');
+    const credential = protocol === 'tencent_rec_task' ? 'SecretKey' : protocol === 'volcengine_flash' ? 'Access Token' : 'API Key';
+    assert.equal(field(credential).props.placeholder, '输入 ' + credential);
+    assert.equal(!!nodes.find(node => node.type === 'label' && node.children[0] === 'App ID（应用标识）'), protocol === 'volcengine_flash');
+    assert.equal(!!nodes.find(node => node.type === 'label' && node.children[0] === '语音资源ID'), protocol === 'volcengine_flash');
+    assert.equal(!!nodes.find(node => node.type === 'label' && node.children[0] === 'SecretId（凭据标识）'), protocol === 'tencent_rec_task');
+    assert.equal(!!nodes.find(node => node.type === 'label' && node.children[0] === '地域（可选）'), protocol === 'tencent_rec_task');
+    assert.equal(JSON.stringify(values), before); assert.deepEqual(f.calls, []);
+  }
+});
+
+test('protocol change through the rendered menu never applies examples and still revokes upload consent', async () => {
+  const f = await fixture({ values: { mode: 'cloud', cloudProtocol: 'auto', cloudEndpoint: 'https://gateway.example.test/custom/transcribe',
+    cloudModel: 'my-account-model', cloudAppId: 'my-app', cloudRegion: 'my-region', cloudResourceId: 'my-resource',
+    cloudResponseFormat: 'json', proxy: 'http://127.0.0.1:3128', cloudUploadConsent: true }, savedKey: OLD_KEY });
+  await f.controller.load();
+  const initial = JSON.stringify(f.controller.snapshot().draft);
+  const legacy = await renderMode('cloud', { ...f.controller.snapshot() });
+  assert.equal(JSON.stringify(f.controller.snapshot().draft), initial); assert.equal(f.controller.snapshot().dirty, false);
+  assert.deepEqual(f.calls.map(call => call.action), ['config']); assert.deepEqual(legacy.calls, []);
+  for (const protocol of ['openai', 'dashscope_paraformer', 'dashscope_qwen', 'volcengine_flash', 'tencent_rec_task']) {
+    f.controller.update('cloudUploadConsent', true); f.controller.setSecret(KEY);
+    const previous = { ...f.controller.snapshot().draft };
+    const rendered = await renderMode('cloud', { ...f.controller.snapshot() }); rendered.componentRef.current = f.controller;
+    const label = treeNodes(rendered.tree).find(node => node.type === 'label' && node.children[0] === '接口协议');
+    treeNodes(label).find(node => node.type === 'select').props.onChange({ currentTarget: { value: protocol } });
+    const state = f.controller.snapshot();
+    assert.deepEqual({ ...state.draft }, { ...previous, cloudProtocol: protocol, cloudUploadConsent: false });
+    assert.equal(state.secretAction, 'keep'); assert.equal(state.secretDraftPresent, false);
+    assert.equal(f.getSavedKey(), OLD_KEY); assert.equal(JSON.stringify(state).includes(KEY), false);
+    assert.deepEqual(f.calls.map(call => call.action), ['config']);
+  }
+  assert.equal(await f.controller.save(), true);
+  assert.deepEqual(f.calls.at(-1).body.patch, { cloudProtocol: 'tencent_rec_task', cloudUploadConsent: false });
+  assert.deepEqual(f.calls.at(-1).body.secret, { action: 'keep' }); assert.equal(f.getSavedKey(), OLD_KEY);
+  f.controller.dispose();
+});
+
+test('filetrans protocol mismatch gives a safe selection hint instead of suggesting runtime installation', async () => {
+  const f = await checkedSummary(rejectDiagnostics({ status: 'ok', backend: rejectDiagnostics({ status: 'protocol_model_mismatch' }) }), 'cloud');
+  const result = f.controller.snapshot().result;
+  assert.match(result.label, /filetrans模型请选择“阿里 \/ 录音文件转写”/);
+  assert.equal(result.ready, false); assert.equal(result.next, '');
+  assert.equal(JSON.stringify(result).includes(OLD_KEY), false); f.controller.dispose();
+});
+
 test('dirty form disables environment/setup UI buttons but preserves save and reload', async () => {
   const f = await renderMode('cloud', { dirty: true });
   const buttons = treeNodes(f.tree).filter(node => node.type === 'button');

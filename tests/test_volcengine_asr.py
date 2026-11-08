@@ -66,6 +66,47 @@ class Tests(unittest.TestCase):
         self.connections = [Connection(Response(good() if payload is None else payload,
                                                  status=status, headers=HEADERS if headers is None else headers))]
 
+    def test_synchronous_wait_over_30s_shares_upload_header_and_body_deadline(self):
+        connection = self.connections[0]
+        response = connection.response
+        clock, read_budgets = [0], []
+
+        def headers():
+            self.assertEqual(connection.timeout, 120)
+            clock[0] += 45
+            return response
+
+        def body():
+            read_budgets.append(connection.timeout)
+            if len(read_budgets) == 1:
+                clock[0] += 40
+
+        response.on_read = body
+        with patch.object(cloud.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(connection, 'getresponse', side_effect=headers):
+            result = self.invoke(timeout=120)
+        self.assertEqual(len(result['segments']), 2)
+        self.assertEqual(read_budgets, [75, 35])
+        self.assertEqual(self.https.call_args.kwargs['timeout'], 30)
+        self.assertTrue(connection.closed)
+        self.https.assert_called_once()
+
+    def test_synchronous_header_timeout_closes_without_resubmitting(self):
+        connection = self.connections[0]
+        clock = [0]
+
+        def headers():
+            self.assertEqual(connection.timeout, 120)
+            clock[0] += 121
+            return connection.response
+
+        with patch.object(cloud.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(connection, 'getresponse', side_effect=headers):
+            self.error('timeout', timeout=120)
+        self.assertEqual(connection.response.reads, 0)
+        self.assertTrue(connection.closed)
+        self.https.assert_called_once()
+
     def test_inline_base64_exact_headers_custom_endpoint_and_real_timestamps(self):
         result = self.invoke()
         connection = self.used[0]

@@ -80,7 +80,7 @@ def _request(body, config, shared, budget):
             shared._socket_budget(connection, budget)
             connection.send(body[index:index + shared.CHUNK_BYTES])
             budget.remaining()
-        shared._socket_budget(connection, budget)
+        shared._socket_budget(connection, budget, response_wait=True)
         response = connection.getresponse()
         budget.remaining()
         shared._status(response.status)
@@ -92,7 +92,7 @@ def _request(body, config, shared, budget):
             if code == '55000031':
                 shared._fail('rate_limited')
             shared._fail('provider_error' if code is not None else 'invalid_response')
-        raw = shared._read_response(response, connection, budget)
+        raw = shared._read_response(response, connection, budget, response_wait=True)
         try:
             payload = json.loads(raw.decode('utf-8-sig'), parse_constant=shared._reject_constant)
         except (ValueError, UnicodeError):

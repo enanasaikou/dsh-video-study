@@ -548,25 +548,165 @@ class AliyunTests(unittest.TestCase):
         for private in (KEY, result_url, TASK_ID, upload, 'FAKE_OSS_RESULT_KEY'):
             self.assertNotIn(private, json.dumps(out))
 
-    def test_plain_http_result_allowed_for_filetrans_only_and_disclosed(self):
-        relay = 'https://relay.example.com/api/v1/services/audio/asr/transcription'
-        insecure = RESULT.replace('https://', 'http://')
-        self.sequence(Response(policy()), Response(b''),
-                      Response({'output': dict(task_id=TASK_ID, task_status='PENDING')}),
-                      Response({'output': dict(task_id=TASK_ID, task_status='SUCCEEDED',
-                                               result=dict(transcription_url=insecure))}),
+    def filetrans_sequence(self, result_url):
+        self.sequence(Response(policy()), Response(b''), Response(task()),
+                      Response(task('SUCCEEDED', result=dict(transcription_url=result_url))),
                       Response(transcript()))
-        with patch.object(m.http.client, 'HTTPConnection', side_effect=self.connect):
-            out = self.invoke(protocol='dashscope_paraformer', endpoint=relay, region='',
-                              model='qwen3-asr-flash-filetrans')
-        self.assertIn('result_url_used_plain_http_from_provider', out['warnings'])
-        self.assertEqual(self.connections[4].destination, ('dashscope-result-bj.oss-cn-beijing.aliyuncs.com', 443))
+
+    def filetrans_invoke(self, **changes):
+        return self.invoke(**dict(dict(protocol='dashscope_paraformer', region='',
+                                      model='qwen3-asr-flash-filetrans'), **changes))
+
+    def test_official_http_filetrans_result_uses_https443_without_plaintext_warning(self):
+        insecure = RESULT.replace('https://', 'http://')
+        self.filetrans_sequence(insecure)
+        out = self.filetrans_invoke()
+        fetched = self.connections[4]
+        self.assertEqual(fetched.destination, ('dashscope-result-bj.oss-cn-beijing.aliyuncs.com', 443))
+        self.assertEqual(fetched.request[:2], ('GET', RESULT.split('.com', 1)[1]))
+        self.assertNotIn('Authorization', fetched.headers)
+        self.assertNotIn('result_url_used_plain_http_from_provider', out['warnings'])
+        self.assertEqual(len(self.connections), 5)
+        self.assertEqual(self.https.call_count, 5)
+        self.http.assert_not_called()
+        for private in (KEY, insecure, RESULT, 'FAKE_OSS_RESULT_KEY', 'FAKE%2BSIGNATURE%3D'):
+            self.assertNotIn(private, json.dumps(out))
         # The legacy Paraformer job keeps the stricter HTTPS-only result origin.
         self.connections.clear()
         self.sequence(Response(policy()), Response(b''), Response(task()),
                       Response(task('SUCCEEDED', results=[dict(subtask_status='SUCCEEDED', transcription_url=insecure)])),
                       Response(transcript()))
         self.code('unsafe_provider_url')
+        self.assertEqual(len(self.connections), 4)
+        self.http.assert_not_called()
+
+    def test_http_upgrade_preserves_signed_path_query_order_case_and_proxy_key_isolation(self):
+        relay = 'https://relay.example.com/api/v1/services/audio/asr/transcription'
+        suffix = ('/pre/filetrans-16k/20260901/15%3a11/result.json'
+                  '?Signature=A+b%2fc%3D&Expires=1999999999&OSSAccessKeyId=FAKE_OSS_RESULT_KEY'
+                  '&x-oss-security-token=TOKEN%2b%2F%3d'
+                  '&response-content-type=application%2fjson')
+        url = 'http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com' + suffix
+        self.filetrans_sequence(url)
+        out = self.filetrans_invoke(endpoint=relay, proxy='http://127.0.0.1:7897')
+        self.assertEqual(len(out['segments']), 2)
+        fetched = self.connections[4]
+        self.assertEqual(fetched.destination, ('127.0.0.1', 7897))
+        self.assertEqual(fetched.tunnel, ('dashscope-result-bj.oss-cn-beijing.aliyuncs.com', 443, {}))
+        self.assertEqual(fetched.request[:2], ('GET', suffix))
+        self.assertNotIn('Authorization', fetched.headers)
+        self.assertNotIn('Proxy-Authorization', fetched.headers)
+        self.assertNotIn(KEY.encode(), b''.join(fetched.sent))
+        for index in (0, 2, 3):
+            self.assertEqual(self.connections[index].headers.get('Authorization'), 'Bearer ' + KEY)
+        self.assertTrue(all(conn.closed for conn in self.connections))
+        self.http.assert_not_called()
+
+    def test_http_upgrade_keeps_v4_signed_request_bytes_verbatim(self):
+        suffix = ('/pre/15%3A11/result.json?x-oss-signature-version=OSS4-HMAC-SHA256'
+                  '&x-oss-credential=FAKE_ACCESS%2f20261108%2fcn-beijing%2foss%2faliyun_v4_request'
+                  '&x-oss-date=20261108T000000Z&x-oss-expires=3600'
+                  '&x-oss-signature=ABCdef0123&x-oss-security-token=TOKEN%2Bwith+plus%3d')
+        url = 'http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com' + suffix
+        self.filetrans_sequence(url)
+        self.filetrans_invoke()
+        self.assertEqual(self.connections[4].request[:2], ('GET', suffix))
+        self.assertEqual(self.connections[4].destination, ('dashscope-result-bj.oss-cn-beijing.aliyuncs.com', 443))
+        self.http.assert_not_called()
+
+    def test_http_upgrade_same_origin_still_does_not_authorize_storage_role(self):
+        host = 'dashscope-file.oss-cn-beijing.aliyuncs.com'
+        insecure = RESULT.replace('https://', 'http://').replace('dashscope-result-bj.oss-cn-beijing.aliyuncs.com', host)
+        self.filetrans_sequence(insecure)
+        self.filetrans_invoke(endpoint='https://' + host + '/custom-api')
+        for index, conn in enumerate(self.connections):
+            self.assertEqual(conn.destination, (host, 443))
+            if index in (0, 2, 3):
+                self.assertEqual(conn.headers.get('Authorization'), 'Bearer ' + KEY)
+            else:
+                self.assertNotIn('Authorization', conn.headers)
+                self.assertNotIn(KEY.encode(), b''.join(conn.sent))
+        self.http.assert_not_called()
+
+    def test_official_http_result_fallback_array_also_uses_https(self):
+        insecure = RESULT.replace('https://', 'http://')
+        self.sequence(Response(policy()), Response(b''), Response(task()),
+                      Response(task('SUCCEEDED', results=[dict(subtask_status='SUCCEEDED', transcription_url=insecure)])),
+                      Response(transcript()))
+        self.filetrans_invoke()
+        self.assertEqual(self.connections[4].destination, ('dashscope-result-bj.oss-cn-beijing.aliyuncs.com', 443))
+        self.assertEqual(self.connections[4].request[:2], ('GET', RESULT.split('.com', 1)[1]))
+        self.http.assert_not_called()
+
+    def test_official_http_result_tls_failure_never_downgrades_retries_or_leaks_signature(self):
+        insecure = RESULT.replace('https://', 'http://')
+        original = self.connect
+        for proxy in (None, 'http://127.0.0.1:7897'):
+            with self.subTest(proxy=bool(proxy)):
+                self.connections.clear()
+                self.filetrans_sequence(insecure)
+                def tls_failure(*args, **kwargs):
+                    conn = original(*args, **kwargs)
+                    if len(self.connections) == 5:
+                        conn.error = m.ssl.SSLCertVerificationError(KEY + insecure)
+                    return conn
+                self.https.side_effect = tls_failure
+                self.code('network_error', function=self.filetrans_invoke, proxy=proxy)
+                self.assertEqual(len(self.connections), 5)
+                self.assertEqual(self.connections[-1].response.reads, 0)
+                self.assertNotIn('Authorization', self.connections[-1].headers)
+                self.assertTrue(all(conn.closed for conn in self.connections))
+                self.http.assert_not_called()
+
+    def test_gateway_http_result_is_rejected_even_on_same_host_or_site(self):
+        relay = 'https://maas.example-gateway.test/api/v1/services/audio/asr/transcription'
+        for host in ('maas.example-gateway.test', 'cdn.example-gateway.test'):
+            with self.subTest(host=host):
+                self.connections.clear()
+                self.filetrans_sequence('http://' + host + '/files/result.json?token=FAKE_TOKEN')
+                self.code('unsafe_provider_url', function=self.filetrans_invoke, endpoint=relay)
+                self.assertEqual(len(self.connections), 4)
+                self.http.assert_not_called()
+
+    def test_http_result_upgrade_does_not_bypass_oss_url_validation(self):
+        insecure = RESULT.replace('https://', 'http://')
+        host = 'http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com'
+        signed = '?Expires=1999999999&OSSAccessKeyId=FAKE&Signature=FAKE'
+        bad = [insecure.replace('.aliyuncs.com', '.aliyuncs.com.evil.invalid'),
+               insecure.replace('http://', 'http://user:pass@'),
+               insecure.replace('http://', 'http://@'),
+               insecure.replace('.aliyuncs.com/', '.aliyuncs.com:80/'),
+               insecure.replace('.aliyuncs.com/', '.aliyuncs.com:443/'),
+               insecure.replace('oss-cn-beijing', 'oss-ap-southeast-1'),
+               host + '/a/../result.json' + signed,
+               host + '/%2e%2e/result.json' + signed,
+               host + '/a%2fb/result.json' + signed,
+               host + '/%252e%252e/result.json' + signed,
+               host + '//result.json' + signed,
+               insecure + '#fragment', insecure + '&Signature=duplicate',
+               insecure + '&redirect=https%3A%2F%2Fevil.invalid',
+               host + '/result.json?Expires=1&OSSAccessKeyId=k&Signature=%00',
+               host + '/result.json', host + '/result.txt' + signed,
+               insecure.replace('http://', 'ftp://'),
+               'http://127.0.0.1/result.json' + signed]
+        for url in bad:
+            with self.subTest(attack=bad.index(url)):
+                self.connections.clear()
+                self.filetrans_sequence(url)
+                self.code('unsafe_provider_url', function=self.filetrans_invoke)
+                self.assertEqual(len(self.connections), 4)
+                self.http.assert_not_called()
+
+    def test_upgraded_result_redirect_still_stops_without_following_or_downgrading(self):
+        insecure = RESULT.replace('https://', 'http://')
+        self.filetrans_sequence(insecure)
+        redirected = Response((KEY + insecure).encode(), status=302,
+                              headers={'Location': insecure})
+        self.responses[-1] = redirected
+        self.code('redirect_rejected', function=self.filetrans_invoke)
+        self.assertEqual(len(self.connections), 5)
+        self.assertEqual(redirected.reads, 0)
+        self.http.assert_not_called()
 
     def test_filetrans_result_must_use_the_region_named_by_the_upload_policy(self):
         relay = 'https://relay.example.com/api/v1/services/audio/asr/transcription'

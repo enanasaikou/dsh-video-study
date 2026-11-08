@@ -8,9 +8,19 @@
 - **Windows x64 / arm64**：主按钮可准备插件私有 Python，无需先装系统 Python。**其他系统**：仍需先有本机 Python **3.10 或更新版本**，按钮在此基础上创建 venv。宿主与 Node 仍需自行准备。
 - 只处理你有权访问和使用的视频。第一次建议选一段**已有字幕的短视频**，先跑通默认字幕模式，不必配置云服务。
 
-### 获取插件包
+### 通过 DSH 安装（推荐）
 
-当前没有固定的 Release 下载入口，也未提供 npm 安装方式。请使用维护者交付的可信 `.tgz`；或者安装 Git、Node/npm 后，从源码自行打包：
+插件已发布到 npm。在已配置好 `dsh` 命令的终端执行，安装到 `web` profile：
+
+```sh
+dsh plugin --profile web add dsh-video-study@0.9.1
+```
+
+这是 DSH 插件管理命令，不是直接执行 `npm install dsh-video-study`。若已有同名插件，安装会更新或替换该 profile 中的插件；请先确认目标 profile。宿主和 Node 不由插件安装。
+
+### 使用 TGZ 或从源码打包
+
+若终端找不到 `dsh` 命令，或需要本地包安装，可从 [GitHub 0.9.1 Release](https://github.com/enanasaikou/dsh-video-study/releases/tag/v0.9.1) 下载可信的 `dsh-video-study-0.9.1.tgz`，交给 DSH 插件管理安装；也可安装 Git、Node/npm 后，从源码自行打包：
 
 ```sh
 git clone https://github.com/enanasaikou/dsh-video-study.git

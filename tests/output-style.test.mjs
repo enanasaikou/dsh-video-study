@@ -23,6 +23,8 @@ function fixture(config = {}, overrides = {}) {
   const calls = [], scratches = [], accesses = [], workspaces = [], auth = [], uuids = [];
   const runtime = createRuntime(config, {
     root: resolve('.'),
+    // Keep all discovery fake, including the Windows portable-runtime pointer.
+    readManagedPythonImpl: async () => null,
     getWorkspace: async execution => { workspaces.push(execution); return workspace; },
     accessImpl: async path => { accesses.push(path); throw Error('fixture has no managed Python'); },
     createScratchImpl: async base => {

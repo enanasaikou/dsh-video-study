@@ -22,7 +22,12 @@ assert.equal(pkg.homepage, 'https://github.com/enanasaikou/dsh-video-study#readm
 assert.equal(pkg.bugs.url, 'https://github.com/enanasaikou/dsh-video-study/issues');
 const home = read(join(root, 'README.md'));
 assert.ok(home.includes(`云端稳定版 ${pkg.version}`), 'README/package version mismatch');
-assert.ok(home.includes('npm pack --ignore-scripts'), 'Source-to-TGZ route must be actionable');
+assert.ok(home.includes(`dsh plugin --profile web add ${pkg.name}@${pkg.version}`),
+  'README DSH install command/package version mismatch');
+const gettingStarted = read(join(root, 'docs/getting-started.md'));
+assert.ok(gettingStarted.includes(`dsh plugin --profile web add ${pkg.name}@${pkg.version}`),
+  'Getting-started DSH install command/package version mismatch');
+assert.ok(gettingStarted.includes('npm pack --ignore-scripts'), 'Source-to-TGZ fallback must be actionable');
 assert.ok(home.includes('人工编写的格式示例'), 'Illustrative output must not claim real ASR evidence');
 assert.ok(home.includes('可能收费'), 'Cloud cost/consent warning must stay visible');
 assert.doesNotMatch(home, /ask_user_question|output_style_required|本次 TGZ|三段长说明/,

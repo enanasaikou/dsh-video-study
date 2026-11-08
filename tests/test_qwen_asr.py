@@ -146,6 +146,52 @@ class QwenTests(unittest.TestCase):
             self.code('timeout', timeout=1)
         self.assertTrue(self.conn.closed)
 
+    def test_synchronous_wait_over_30s_keeps_one_shared_budget(self):
+        for proxy in (None, 'http://127.0.0.1:7897'):
+            with self.subTest(proxy=bool(proxy)):
+                self.https.reset_mock()
+                self.conn = Connection(Response(completion()))
+                clock, read_budgets = [0], []
+                response = self.conn.response
+
+                def headers():
+                    self.assertEqual(self.conn.timeout, 120)
+                    clock[0] += 45
+                    return response
+
+                def body():
+                    read_budgets.append(self.conn.timeout)
+                    if len(read_budgets) == 1:
+                        clock[0] += 40
+
+                response.on_read = body
+                with patch.object(m.time, 'monotonic', side_effect=lambda: clock[0]), \
+                     patch.object(self.conn, 'getresponse', side_effect=headers):
+                    result = self.invoke(timeout=120, proxy=proxy)
+                self.assertEqual(result['text'], 'real recognized words')
+                self.assertEqual(read_budgets, [75, 35])
+                self.assertEqual(self.https.call_args.kwargs['timeout'], 30)
+                self.assertTrue(self.conn.closed)
+                self.https.assert_called_once()
+
+    def test_synchronous_timeout_after_headers_closes_without_retry(self):
+        clock = [0]
+
+        def headers():
+            clock[0] += 70
+            return self.conn.response
+
+        def body():
+            self.assertEqual(self.conn.timeout, 50)
+            clock[0] += 51
+
+        self.conn.response.on_read = body
+        with patch.object(m.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(self.conn, 'getresponse', side_effect=headers):
+            self.code('timeout', timeout=120)
+        self.assertTrue(self.conn.closed)
+        self.https.assert_called_once()
+
     def test_consent_and_https_required_before_file_read(self):
         with patch.object(m, 'Path', side_effect=AssertionError('must not read file')):
             self.code('upload_consent_required', upload_consent=False)

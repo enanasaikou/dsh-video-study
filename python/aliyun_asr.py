@@ -80,7 +80,10 @@ def _storage_url(value, region, c, *, upload=False, allow_http=False, same_site=
     encoding, credentials, ports, redirects and arbitrary query keys are not.
     A result may also live on the host that answered the task call (or its
     subdomains); those URLs carry no credentials, no redirects and only bounded
-    printable query fields. Never return this private URL to the caller.
+    printable query fields. For filetrans only, a fully validated official OSS
+    HTTP result is upgraded to HTTPS/443; the signed path/query bytes are kept.
+    Gateway HTTP and HTTP uploads are never allowed. No downgrade is attempted.
+    Never return this private URL to the caller.
     """
     def bad(reason):
         error = c.CloudASRError('unsafe_provider_url', c._MESSAGES['unsafe_provider_url'])
@@ -109,7 +112,8 @@ def _storage_url(value, region, c, *, upload=False, allow_http=False, same_site=
                         if site and not site.endswith(_SHARED_PLATFORM))
         same_site = bool(gateway) and not oss and (
             host in gateway or any(host.endswith('.' + site) for site in gateway))
-        if p.scheme not in (('https', 'http') if allow_http else ('https',)):
+        if (p.scheme not in (('https', 'http') if allow_http else ('https',))
+                or p.scheme == 'http' and (upload or not allowed)):
             bad('scheme')
         if not (allowed or same_site):
             bad('host')
@@ -176,7 +180,10 @@ def _storage_url(value, region, c, *, upload=False, allow_http=False, same_site=
         if not (v1 <= fields.keys() and fields['Expires'].isdigit()
                 or v4 <= fields.keys() and fields['x-oss-expires'].isdigit()):
             bad('query_signature')
-        return dict(scheme=p.scheme, host=host, port=443,
+        # Only this fully validated OSS result branch may accept provider HTTP.
+        # Scheme is not part of OSS's signed resource: preserve the original
+        # host, escaped path and ordered query verbatim, and always use TLS/443.
+        return dict(scheme='https', host=host, port=443,
                     path=p.path + '?' + p.query, loopback=False, region=_host_region(host))
     except (ValueError, UnicodeError):
         bad('parse')
@@ -190,7 +197,6 @@ class _Session:
         self.response_bytes = 0
         self.private = [config['api_key']]
         self.filetrans = 'filetrans' in str(config['model']).lower()
-        self.result_http = False
         self.same_site = tuple(dict.fromkeys(
             site for site in (config['host'], _site(config['host'])) if site))
         self.result_host = None
@@ -422,7 +428,6 @@ class _Session:
                     exc.host = self.result_host
                     exc.reason = getattr(exc, 'reason', None) or 'unnamed'
                     raise
-                self.result_http = target['scheme'] == 'http'
                 self.private.append(url)
                 # Reject signing credentials even if the transcript echoes only
                 # a token rather than the complete private result URL.
@@ -491,8 +496,6 @@ class _Session:
                                                  language=language), provider_model=self.config['model'],
                       engine=self.config['engine'], response_format=self.config['response_format'],
                       warnings=list(self.config['warnings']))
-        if self.result_http:
-            result['warnings'].append('result_url_used_plain_http_from_provider')
         for private in self.private:
             c._no_secret(result, private)
         self.budget.remaining()

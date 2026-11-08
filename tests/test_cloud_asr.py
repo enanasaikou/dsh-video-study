@@ -598,6 +598,86 @@ class Tests(unittest.TestCase):
         self.assertTrue(self.connection.closed)
         self.assertLessEqual(max(self.connection.sock.timeouts), 3)
 
+    def test_synchronous_response_can_wait_over_30s_without_resetting_budget(self):
+        for proxy in (None, 'http://127.0.0.1:7897'):
+            with self.subTest(proxy=bool(proxy)):
+                self.https.reset_mock()
+                self.connection = Connection()
+                clock, read_budgets = [0], []
+                response = self.connection.response
+
+                def headers_after_computation():
+                    self.assertEqual(self.connection.timeout, 120)
+                    clock[0] += 45
+                    return response
+
+                def delayed_body():
+                    read_budgets.append(self.connection.timeout)
+                    if len(read_budgets) == 1:
+                        clock[0] += 40
+
+                response.on_read = delayed_body
+                with patch.object(m.time, 'monotonic', side_effect=lambda: clock[0]), \
+                     patch.object(self.connection, 'getresponse', side_effect=headers_after_computation):
+                    result = self.invoke(timeout=120, proxy=proxy)
+                self.assertEqual(len(result['segments']), 2)
+                self.assertEqual(read_budgets, [75, 35])
+                self.assertEqual(self.https.call_args.kwargs['timeout'], 30)
+                self.https.assert_called_once()
+                self.assertTrue(self.connection.closed)
+                self.assertLessEqual(max(self.connection.sock.timeouts[:4]), 30)
+
+    def test_synchronous_header_wait_exhausts_total_budget_without_retry(self):
+        clock = [0]
+
+        def late_headers():
+            self.assertEqual(self.connection.timeout, 120)
+            clock[0] += 121
+            return self.connection.response
+
+        with patch.object(m.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(self.connection, 'getresponse', side_effect=late_headers):
+            self.code('timeout', self.invoke, timeout=120)
+        self.assertTrue(self.connection.closed)
+        self.assertEqual(self.connection.response.reads, 0)
+        self.https.assert_called_once()
+
+    def test_synchronous_response_body_shares_header_deadline_without_retry(self):
+        clock = [0]
+
+        def headers():
+            clock[0] += 70
+            return self.connection.response
+
+        def body():
+            self.assertEqual(self.connection.timeout, 50)
+            clock[0] += 51
+
+        self.connection.response.on_read = body
+        with patch.object(m.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(self.connection, 'getresponse', side_effect=headers):
+            self.code('timeout', self.invoke, timeout=120)
+        self.assertTrue(self.connection.closed)
+        self.https.assert_called_once()
+
+    def test_response_wait_updates_detached_response_socket(self):
+        from types import SimpleNamespace
+        clock = [0]
+        with patch.object(m.time, 'monotonic', side_effect=lambda: clock[0]):
+            budget = m._Budget(120)
+            connection = Connection()
+            connection.sock = None
+            sock = Socket()
+            response = Response()
+            response.fp = SimpleNamespace(raw=SimpleNamespace(_sock=sock))
+            clock[0] = 45
+            m._socket_budget(connection, budget, response, response_wait=True)
+            self.assertEqual(sock.timeouts, [75])
+            self.assertEqual(connection.timeout, 75)
+            clock[0] = 121
+            self.code('timeout', m._socket_budget, connection, budget, response, response_wait=True)
+            self.assertEqual(sock.timeouts, [75])
+
     def test_network_timeout_and_tls_errors_do_not_leak(self):
         for error, expected in ((OSError(KEY + ENDPOINT), 'network_error'),
                                 (http.client.HTTPException(KEY + ENDPOINT), 'network_error'),
