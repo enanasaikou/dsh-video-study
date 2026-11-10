@@ -17,7 +17,8 @@ function createVideoStudyClient(React, qrcode, platform) {
   var FLOW = /^[A-Za-z0-9_-]{8,128}$/;
   var safeErrors = new WeakMap();
   var errorMessages = Object.freeze({
-    unsupported_proxy: '当前登录通道不支持所配置的代理，请调整后重试。',
+    unsupported_proxy: '代理地址无效；登录仅支持不带账号密码的 http://主机:端口。',
+    proxy_error: '代理连接失败，未降级直连；请检查代理地址与端口后重试。',
     unsupported_qr_url: '平台返回的扫码链接不在支持范围内，请更新插件后重试。',
     network_error: '无法连接B站登录服务，请检查网络与代理后重试。',
     timeout: '登录请求超时，请稍后重试。',

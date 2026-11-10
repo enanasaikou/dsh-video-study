@@ -458,8 +458,89 @@ test('QR URLs reject lookalikes, subdomains, insecure ports, userinfo, fragments
   }
 })
 
-test('API refuses proxy explicitly and does not consult environment proxy', async () => {
-  assert.throws(() => createBiliApi({ proxy: 'http://127.0.0.1:7897' }), error => error.code === 'unsupported_proxy')
+function tunnelRequests({ reply = apiResponse({ url: QRURL, qrcode_key: QRKEY }), connectStatus = 200,
+  connectError = false, connectHang = false, tlsError = false, tlsAuthorized = true, tlsHang = false } = {}) {
+  const connectCalls = [], httpsCalls = [], tlsCalls = [], sockets = [], secureSockets = []
+  const requestImpl = (url, options, callback) => {
+    const req = new EventEmitter()
+    req.destroy = () => { req.destroyed = true }
+    req.setTimeout = (ms, fn) => { req.timeoutMs = ms; req.onTimeout = fn }
+    req.end = () => {
+      queueMicrotask(() => {
+        const res = new EventEmitter()
+        res.statusCode = reply?.status ?? 200
+        res.headers = reply?.headers ?? {}
+        res.destroy = () => { res.destroyed = true }
+        callback(res)
+        if (res.destroyed) return
+        const raw = reply?.raw ?? JSON.stringify(reply?.body ?? { code: 0, data: {} })
+        res.emit('data', Buffer.from(raw)); res.emit('end')
+      })
+    }
+    httpsCalls.push({ url, options })
+    return req
+  }
+  const httpRequest = options => {
+    const req = new EventEmitter()
+    req.destroy = () => { req.destroyed = true }
+    req.setTimeout = (ms, fn) => { req.timeoutMs = ms; req.onTimeout = fn }
+    req.end = () => {
+      if (connectHang) return
+      queueMicrotask(() => {
+        if (connectError) return req.emit('error', new Error('ECONNREFUSED'))
+        if (connectStatus !== 200) {
+          const res = new EventEmitter()
+          res.statusCode = connectStatus
+          return req.emit('response', res)
+        }
+        const socket = new EventEmitter()
+        socket.destroy = () => { socket.destroyed = true }
+        sockets.push(socket)
+        req.emit('connect', { statusCode: 200 }, socket, Buffer.alloc(0))
+      })
+    }
+    connectCalls.push(options)
+    return req
+  }
+  const tlsConnect = options => {
+    const secure = new EventEmitter()
+    secure.authorized = tlsAuthorized
+    secure.destroy = () => { secure.destroyed = true }
+    tlsCalls.push(options)
+    secureSockets.push(secure)
+    if (!tlsHang) queueMicrotask(() => {
+      if (tlsError) return secure.emit('error', new Error('certificate'))
+      secure.emit('secureConnect')
+    })
+    return secure
+  }
+  return { connectCalls, httpsCalls, tlsCalls, sockets, secureSockets, requestImpl, httpRequest, tlsConnect }
+}
+
+test('API reaches the fixed Bilibili origin through the explicit HTTP CONNECT proxy', async () => {
+  const mock = tunnelRequests()
+  const api = createBiliApi({ proxy: 'http://127.0.0.1:7897', ...mock })
+  assert.equal((await api.generateQr()).qrkey, QRKEY)
+  assert.equal(mock.connectCalls.length, 1)
+  assert.equal(mock.connectCalls[0].method, 'CONNECT')
+  assert.equal(mock.connectCalls[0].hostname, '127.0.0.1')
+  assert.equal(mock.connectCalls[0].port, 7897)
+  assert.equal(mock.connectCalls[0].path, 'passport.bilibili.com:443')
+  assert.equal(mock.connectCalls[0].headers.Host, 'passport.bilibili.com:443')
+  assert.equal(mock.tlsCalls[0].servername, 'passport.bilibili.com')
+  assert.equal(mock.tlsCalls[0].rejectUnauthorized, true)
+  assert.equal(mock.httpsCalls.length, 1)
+  assert.equal(mock.httpsCalls[0].url.href, 'https://passport.bilibili.com/x/passport-login/web/qrcode/generate')
+  assert.equal(mock.httpsCalls[0].options.headers.Cookie, undefined)
+  assert.equal(mock.httpsCalls[0].options.agent.createConnection(), mock.secureSockets[0])
+  api.dispose()
+})
+
+test('API rejects malformed proxies instead of silently going direct', async () => {
+  for (const proxy of ['socks5://127.0.0.1:7897', 'https://127.0.0.1:7897', 'http://user:pass@127.0.0.1:7897',
+    'http://127.0.0.1:7897/path', 'http://127.0.0.1:7897?x=1', 'http://127.0.0.1', 'http://127.0.0.1:0', ' http://127.0.0.1:7897']) {
+    assert.throws(() => createBiliApi({ proxy, ...tunnelRequests() }), error => error.code === 'unsupported_proxy')
+  }
   const previous = process.env.HTTPS_PROXY
   process.env.HTTPS_PROXY = 'http://evil.invalid:9999'
   try {
@@ -469,6 +550,24 @@ test('API refuses proxy explicitly and does not consult environment proxy', asyn
     assert.equal(Object.hasOwn(mock.calls[0].options, 'proxy'), false)
     api.dispose()
   } finally { if (previous === undefined) delete process.env.HTTPS_PROXY; else process.env.HTTPS_PROXY = previous }
+})
+
+test('proxy and TLS failures stop once, report safely and never try a direct request', async () => {
+  for (const [options, code] of [[{ connectError: true }, 'proxy_error'], [{ connectStatus: 407 }, 'proxy_error'],
+    [{ tlsError: true }, 'network_error'], [{ tlsAuthorized: false }, 'network_error']]) {
+    const mock = tunnelRequests(options)
+    const api = createBiliApi({ proxy: 'http://127.0.0.1:7897', ...mock })
+    await rejectsCode(api.generateQr(), code)
+    assert.equal(mock.connectCalls.length, 1)
+    assert.equal(mock.httpsCalls.length, 0)
+    api.dispose()
+  }
+  const mock = tunnelRequests({ connectHang: true })
+  const api = createBiliApi({ proxy: 'http://127.0.0.1:7897', timeoutMs: 100, ...mock })
+  const pending = api.generateQr()
+  await rejectsCode(pending, 'timeout')
+  assert.equal(mock.httpsCalls.length, 0)
+  api.dispose()
 })
 
 test('API redirects, risk and network errors are safe and never retried', async () => {

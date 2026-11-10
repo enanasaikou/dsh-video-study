@@ -44,7 +44,8 @@
 | `invalid_endpoint` / `insecure_endpoint` | 填完整 API 接口而非控制台网址；远程用 HTTPS，去掉地址中的凭据、查询参数和片段。回环HTTP例外只适用于明确允许的本机兼容服务。 |
 | `protocol_model_mismatch` | filetrans 异步模型不能用聊天或 OpenAI兼容文件协议。选择“DashScope Paraformer异步”及 `/api/v1/services/audio/asr/transcription`。 |
 | `authentication_failed` / `access_denied` | 到服务商控制台核对 Key所属地域、产品开通、模型/资源权限及额度；插件不会换 Key 或换服务重试。 |
-| `invalid_proxy` / `unsupported_proxy` / `proxy_loopback_conflict` | 云端仅支持显式无认证的 `http://host:port` 代理，不能带路径/查询；本机明文回环接口不能同时配代理。不要靠关闭 TLS 验证解决。 |
+| `invalid_proxy` / `unsupported_proxy` / `proxy_loopback_conflict` | 字幕下载、B站扫码登录和云端ASR共用同一个代理，仅支持显式无认证的 `http://host:port`，不能带路径/查询；本机明文回环接口不能同时配代理。不要靠关闭 TLS 验证解决。 |
+| `proxy_error` | 已配置的代理连不上（拒绝、407 或握手失败）；插件会报错并停止，不会自动改成直连。检查代理地址、端口和运行状态后重试，或清空代理保存。 |
 | `rate_limited` / `timeout` | 查服务商任务/费用状态，必要时等待再手动重试或调整合理时限。不会自动重传；客户端超时不证明云端任务已经取消。 |
 | `size_limit` / `audio_too_large` / `request_too_large` | 同时受本次MiB限制及服务商上限约束：Qwen聊天编码后10,000,000字节；腾讯内联原音频5,000,000字节；火山100,000,000字节且2小时。提高设置不能绕过这些限制，不会自动分块或截断。 |
 | 火山转换时 `dependency_missing` | 部分容器需 PATH 中已有的 ffmpeg；准备 Python 环境不会安装它。直接支持 wav/mp3/ogg/opus，其他已支持格式转换后还要再检查大小。 |
