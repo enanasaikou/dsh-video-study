@@ -4,7 +4,7 @@
 
 这是 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的视频学习插件，不是独立播放器。在对话里给出课程链接，选择完整复述、简要压缩或总结，由助手整理为 Word、Markdown 或 TXT。
 
-云端稳定版 0.9.2 · [开始使用](docs/getting-started.md) · [云端配置](docs/cloud-services.md) · [常见问题](docs/troubleshooting.md)
+云端稳定版 0.9.3 · [开始使用](docs/getting-started.md) · [云端配置](docs/cloud-services.md) · [常见问题](docs/troubleshooting.md)
 
 
 
@@ -28,7 +28,7 @@
 需要已运行的 DSH `>=0.2.1-rc.5 <0.3.0` 和 Node.js `>=22.19.0`
 
 ```sh
-dsh plugin --profile web add dsh-video-study@0.9.2
+dsh plugin --profile web add dsh-video-study@0.9.3
 ```
 
 [获取源码、打包和安装的逐步说明 →](docs/getting-started.md#1-安装插件)

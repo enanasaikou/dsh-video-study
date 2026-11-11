@@ -513,6 +513,39 @@ class Tests(unittest.TestCase):
         self.code('invalid_response', self.run_yt)
         self.assertFalse(list(self.directory.iterdir()))
 
+    def test_youtube_media_request_asks_for_the_whole_file_by_range(self):
+        self.run_yt()
+        request = self.opener.requests[0]
+        self.assertEqual(request.get_header('Range'), 'bytes=0-')
+        self.assertEqual(request.get_header('Accept-encoding'), 'identity')
+
+    def test_bilibili_media_request_keeps_the_plain_get(self):
+        self.run_bili()
+        self.assertIsNone(self.opener.requests[-1].get_header('Range'))
+
+    def test_whole_file_range_response_is_accepted(self):
+        headers = {'Content-Range': f'bytes 0-{len(PAYLOAD) - 1}/{len(PAYLOAD)}',
+                   'Content-Length': str(len(PAYLOAD))}
+        response = Response(headers=headers)
+        response.status = 206
+        self.opener = Opener([response])
+        path, meta = self.run_yt()
+        self.assertEqual(path.read_bytes(), PAYLOAD)
+        self.assertEqual(meta['audio_bytes'], len(PAYLOAD))
+
+    def test_partial_or_inconsistent_range_response_rejected(self):
+        for headers in ({'Content-Range': f'bytes 1-{len(PAYLOAD) - 1}/{len(PAYLOAD)}'},
+                        {'Content-Range': 'bytes 0-9/100'},
+                        {'Content-Range': f'bytes 0-{len(PAYLOAD) - 1}/{len(PAYLOAD)}',
+                         'Content-Length': '1'},
+                        {'Content-Range': 'items 0-9/10'}):
+            with self.subTest(headers=headers):
+                response = Response(headers=headers)
+                response.status = 206
+                self.opener = Opener([response])
+                self.code('invalid_response', self.run_yt)
+                self.assertFalse(list(self.directory.iterdir()))
+
     def test_empty_audio_rejected(self):
         self.opener = Opener([Response(b'')])
         self.code('invalid_response', self.run_yt)

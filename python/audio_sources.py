@@ -346,6 +346,25 @@ def _http_error(error):
           else 'platform_error')
 
 
+_CONTENT_RANGE = re.compile(r'\Abytes 0-(\d+)/(\d+)\Z')
+
+
+def _whole_range(headers):
+    """Require a 206 that covers the entire file from byte 0, with no gap or overlap."""
+    value = headers.get('Content-Range')
+    declared = headers.get('Content-Length')
+    if not isinstance(value, str):
+        _fail('invalid_response')
+    match = _CONTENT_RANGE.match(value.strip())
+    if match is None:
+        _fail('invalid_response')
+    last, total = int(match.group(1)), int(match.group(2))
+    if total <= 0 or last + 1 != total:
+        _fail('invalid_response')
+    if declared is not None and (not str(declared).isdigit() or int(declared) != total):
+        _fail('invalid_response')
+
+
 def _read_stream(response, budget, maximum, sink=None):
     headers = response.headers
     content_length = headers.get('Content-Length')
@@ -541,11 +560,18 @@ def download_audio(target, directory, *, page=None, proxy=None, cookies=None,
         headers = {'User-Agent': 'Mozilla/5.0', 'Accept-Encoding': 'identity'}
         if platform == 'bilibili':
             headers['Referer'] = 'https://www.bilibili.com/'
+        else:
+            # YouTube throttles browser-like media GETs that carry no byte range;
+            # an open-ended range returns the same bytes as a 206 response.
+            headers['Range'] = 'bytes=0-'
         # No extractor-supplied headers, Cookie or Authorization.
         req = Request(url, headers=headers, method='GET')
         try:
             with opener.open(req, timeout=min(30, budget.remaining())) as response:
-                if getattr(response, 'status', 200) != 200 or response.headers.get('Content-Range'):
+                status = getattr(response, 'status', 200)
+                if status == 206:
+                    _whole_range(response.headers)
+                elif status != 200 or response.headers.get('Content-Range'):
                     _fail('invalid_response')
                 mime = response.headers.get('Content-Type', '').lower().split(';')[0].strip()
                 if mime and not (mime.startswith(('audio/', 'video/')) or mime == 'application/octet-stream'):
